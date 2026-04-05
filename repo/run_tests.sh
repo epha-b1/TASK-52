@@ -51,12 +51,27 @@ find_container_on_8080() {
     return 1
 }
 
-# Wait for the target container's /health to respond. Uses `docker exec`
-# so it works even when the host publish binding is flaky.
+# Wait for /health to respond.
+#
+# CI/build environments can report false negatives when probing via
+# `docker exec ... wget http://localhost:8080/health` immediately after a
+# container restart, even while the service is already healthy from the host
+# side. To avoid flaky suite failures, treat either probe as success:
+#
+# 1) host-side:   curl http://localhost:8080/health
+# 2) container-side fallback: docker exec ... wget http://localhost:8080/health
+#
+# This keeps compatibility with both "reused running stack" and
+# "self-started fallback stack" paths.
 wait_healthy() {
     local elapsed=0
     while [ $elapsed -lt $MAX_WAIT ]; do
-        if docker exec -T "$API_CID" wget -qO- "$HEALTH_URL" 2>/dev/null | grep -q '"status"'; then
+        if host_health_ok; then
+            echo "      Ready (${elapsed}s)"
+            return 0
+        fi
+
+        if [ -n "$API_CID" ] && docker exec -T "$API_CID" wget -qO- "$HEALTH_URL" 2>/dev/null | grep -q '"status"'; then
             echo "      Ready (${elapsed}s)"
             return 0
         fi

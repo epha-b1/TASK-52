@@ -111,20 +111,19 @@ run_suite() {
 # Resolve the target container — reuse a running one if present, otherwise
 # bring up our own stack.
 detect_or_start() {
-    # 1. Is something already serving :8080 on the host?
-    if host_health_ok; then
-        local cid
-        if cid=$(find_container_on_8080); then
-            API_CID="$cid"
-            local cname
-            cname=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
-            echo "      Reusing running container: $cname ($cid)"
-            return 0
-        fi
+    # 1. Reuse any running container already bound to host :8080.
+    #    Don't require /health to be up yet; it may still be booting.
+    local cid
+    if cid=$(find_container_on_8080); then
+        API_CID="$cid"
+        local cname
+        cname=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+        echo "      Reusing running container: $cname ($cid)"
+        wait_healthy
+        return 0
     fi
 
     # 2. Is our named project up?
-    local cid
     cid=$(docker compose -p "$FALLBACK_PROJECT" ps -q api 2>/dev/null)
     if [ -n "$cid" ]; then
         local state

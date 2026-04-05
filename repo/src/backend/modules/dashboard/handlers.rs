@@ -1,3 +1,17 @@
+//! Dashboard / reports.
+//!
+//! Filter surface (all optional, combine freely):
+//!
+//! - `from`, `to`           — ISO date range on `intake_records.created_at`
+//! - `status`               — intake status
+//! - `intake_type`          — animal | supply | donation
+//! - `region`               — exact region match
+//! - `tags`                 — substring match against CSV tag column
+//! - `q`                    — full-text substring search against details/region/tags
+//!
+//! `inventory_on_hand` is sourced from the `stock_movements` ledger
+//! (SUM of quantity_delta), NOT `COUNT(supply_entries)`.
+
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
@@ -10,20 +24,80 @@ use crate::error::AppError;
 use crate::extractors::SessionUser;
 use crate::middleware::trace_id::TraceId;
 
+#[derive(Default, Clone)]
+struct DashboardFilters {
+    from: String,
+    to: String,
+    status: String,
+    intake_type: String,
+    region: String,
+    tags: String,
+    q: String,
+}
+
+impl DashboardFilters {
+    fn from_query(q: &HashMap<String, String>) -> Self {
+        Self {
+            from: q.get("from").cloned().unwrap_or_default(),
+            to: q.get("to").cloned().unwrap_or_default(),
+            status: q.get("status").cloned().unwrap_or_default(),
+            intake_type: q.get("intake_type").cloned().unwrap_or_default(),
+            region: q.get("region").cloned().unwrap_or_default(),
+            tags: q.get("tags").cloned().unwrap_or_default(),
+            q: q.get("q").cloned().unwrap_or_default(),
+        }
+    }
+
+    /// Builds the shared `WHERE` fragment + bind list used by every
+    /// count query. A single source of truth so summary + export
+    /// ALWAYS honor the exact same filter semantics.
+    fn where_clause(&self) -> (String, Vec<String>) {
+        let mut parts: Vec<String> = vec!["1=1".into()];
+        let mut binds: Vec<String> = Vec::new();
+        if !self.from.is_empty() {
+            parts.push("created_at >= ?".into());
+            binds.push(self.from.clone());
+        }
+        if !self.to.is_empty() {
+            parts.push("created_at <= ?".into());
+            binds.push(self.to.clone());
+        }
+        if !self.intake_type.is_empty() {
+            parts.push("intake_type = ?".into());
+            binds.push(self.intake_type.clone());
+        }
+        if !self.status.is_empty() {
+            parts.push("status = ?".into());
+            binds.push(self.status.clone());
+        }
+        if !self.region.is_empty() {
+            parts.push("region = ?".into());
+            binds.push(self.region.clone());
+        }
+        if !self.tags.is_empty() {
+            parts.push("tags LIKE ?".into());
+            binds.push(format!("%{}%", self.tags));
+        }
+        if !self.q.is_empty() {
+            // Simple substring "full-text" across the free-form fields.
+            parts.push("(details LIKE ? OR region LIKE ? OR tags LIKE ?)".into());
+            let pat = format!("%{}%", self.q);
+            binds.push(pat.clone());
+            binds.push(pat.clone());
+            binds.push(pat);
+        }
+        (parts.join(" AND "), binds)
+    }
+}
+
 pub async fn summary(
     State(state): State<AppState>,
     Extension(tid): Extension<TraceId>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let t = &tid.0;
-
-    // Optional filters: from, to (ISO date strings), status, intake_type, tag
-    let from = q.get("from").cloned().unwrap_or_default();
-    let to = q.get("to").cloned().unwrap_or_default();
-    let status = q.get("status").cloned().unwrap_or_default();
-    let typ = q.get("intake_type").cloned().unwrap_or_default();
-
-    let metrics = compute_metrics(&state, t, &from, &to, &status, &typ).await?;
+    let filters = DashboardFilters::from_query(&q);
+    let metrics = compute_metrics(&state, t, &filters).await?;
     Ok(Json(serde_json::to_value(metrics).unwrap()))
 }
 
@@ -37,83 +111,110 @@ struct Metrics {
     filters: serde_json::Value,
 }
 
+async fn count_with(
+    pool: &sqlx::SqlitePool,
+    sql: String,
+    binds: &[String],
+    t: &str,
+) -> Result<i64, AppError> {
+    let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+    for b in binds {
+        q = q.bind(b);
+    }
+    let (n,) = q.fetch_one(pool).await.map_err(db_err(t))?;
+    Ok(n)
+}
+
 async fn compute_metrics(
     state: &AppState,
     t: &str,
-    from: &str,
-    to: &str,
-    status_f: &str,
-    type_f: &str,
+    f: &DashboardFilters,
 ) -> Result<Metrics, AppError> {
-    // Base WHERE fragments — additive.
-    let mut where_parts: Vec<String> = vec!["1=1".into()];
-    let mut binds: Vec<String> = Vec::new();
-    if !from.is_empty() { where_parts.push("created_at >= ?".into()); binds.push(from.into()); }
-    if !to.is_empty() { where_parts.push("created_at <= ?".into()); binds.push(to.into()); }
-    if !type_f.is_empty() { where_parts.push("intake_type = ?".into()); binds.push(type_f.into()); }
-    let where_sql = where_parts.join(" AND ");
-
-    // Helper to count intake rows matching filters plus an extra clause.
-    async fn count_with(pool: &sqlx::SqlitePool, sql: String, binds: &[String], t: &str) -> Result<i64, AppError> {
-        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
-        for b in binds { q = q.bind(b); }
-        let (n,) = q.fetch_one(pool).await.map_err(db_err(t))?;
-        Ok(n)
-    }
+    let (where_sql, binds) = f.where_clause();
 
     let intake_total = count_with(
         &state.db,
         format!("SELECT COUNT(*) FROM intake_records WHERE {}", where_sql),
-        &binds, t,
-    ).await?;
+        &binds,
+        t,
+    )
+    .await?;
 
     let mut donations_binds = binds.clone();
     donations_binds.push("donation".into());
     let donations = count_with(
         &state.db,
-        format!("SELECT COUNT(*) FROM intake_records WHERE {} AND intake_type = ?", where_sql),
-        &donations_binds, t,
-    ).await?;
+        format!(
+            "SELECT COUNT(*) FROM intake_records WHERE {} AND intake_type = ?",
+            where_sql
+        ),
+        &donations_binds,
+        t,
+    )
+    .await?;
 
     let mut animals_binds = binds.clone();
     animals_binds.push("animal".into());
     let animals = count_with(
         &state.db,
-        format!("SELECT COUNT(*) FROM intake_records WHERE {} AND intake_type = ?", where_sql),
-        &animals_binds, t,
-    ).await?;
+        format!(
+            "SELECT COUNT(*) FROM intake_records WHERE {} AND intake_type = ?",
+            where_sql
+        ),
+        &animals_binds,
+        t,
+    )
+    .await?;
 
     let mut adopted_binds = binds.clone();
     adopted_binds.push("adopted".into());
     let adopted = count_with(
         &state.db,
-        format!("SELECT COUNT(*) FROM intake_records WHERE {} AND status = ?", where_sql),
-        &adopted_binds, t,
-    ).await?;
+        format!(
+            "SELECT COUNT(*) FROM intake_records WHERE {} AND status = ?",
+            where_sql
+        ),
+        &adopted_binds,
+        t,
+    )
+    .await?;
 
     let tasks_done: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status = 'completed'")
-        .fetch_one(&state.db).await.map_err(db_err(t))?;
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err(t))?;
     let tasks_open: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status IN ('open','in_progress')")
-        .fetch_one(&state.db).await.map_err(db_err(t))?;
-    let inventory: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM supply_entries")
-        .fetch_one(&state.db).await.map_err(db_err(t))?;
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err(t))?;
+
+    // Inventory on hand: canonical source is the stock_movements ledger.
+    // NOT COUNT(supply_entries) any more.
+    let inventory_on_hand = crate::modules::stock::handlers::sum_on_hand(&state.db)
+        .await
+        .map_err(db_err(t))?;
 
     let adoption_conversion = if animals > 0 { adopted as f64 / animals as f64 } else { 0.0 };
     let task_completion_rate = if tasks_done.0 + tasks_open.0 > 0 {
         tasks_done.0 as f64 / (tasks_done.0 + tasks_open.0) as f64
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     Ok(Metrics {
         rescue_volume: intake_total,
         adoption_conversion,
         task_completion_rate,
         donations_logged: donations,
-        inventory_on_hand: inventory.0,
+        inventory_on_hand,
         filters: serde_json::json!({
-            "from": from,
-            "to": to,
-            "status": status_f,
-            "intake_type": type_f,
+            "from": f.from,
+            "to": f.to,
+            "status": f.status,
+            "intake_type": f.intake_type,
+            "region": f.region,
+            "tags": f.tags,
+            "q": f.q,
         }),
     })
 }
@@ -127,20 +228,30 @@ pub async fn export_csv(
     let t = &tid.0;
     require_admin_or_auditor(&user, t)?;
 
-    let from = q.get("from").cloned().unwrap_or_default();
-    let to = q.get("to").cloned().unwrap_or_default();
-    let status = q.get("status").cloned().unwrap_or_default();
-    let typ = q.get("intake_type").cloned().unwrap_or_default();
-    let m = compute_metrics(&state, t, &from, &to, &status, &typ).await?;
+    // Export uses the EXACT same filter set as summary — same parser,
+    // same WHERE builder — so operators can't accidentally get a
+    // different result from the CSV than what they see on screen.
+    let filters = DashboardFilters::from_query(&q);
+    let m = compute_metrics(&state, t, &filters).await?;
 
     let csv = format!(
-        "metric,value\nrescue_volume,{}\ndonations_logged,{}\ninventory_on_hand,{}\nadoption_conversion,{}\ntask_completion_rate,{}\n",
-        m.rescue_volume, m.donations_logged, m.inventory_on_hand, m.adoption_conversion, m.task_completion_rate
+        "metric,value\nrescue_volume,{}\ndonations_logged,{}\ninventory_on_hand,{}\nadoption_conversion,{}\ntask_completion_rate,{}\nfilter_region,{}\nfilter_tags,{}\nfilter_q,{}\n",
+        m.rescue_volume,
+        m.donations_logged,
+        m.inventory_on_hand,
+        m.adoption_conversion,
+        m.task_completion_rate,
+        filters.region,
+        filters.tags,
+        filters.q,
     );
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/csv"));
-    headers.insert("Content-Disposition", HeaderValue::from_static("attachment; filename=\"report.csv\""));
+    headers.insert(
+        "Content-Disposition",
+        HeaderValue::from_static("attachment; filename=\"report.csv\""),
+    );
     Ok((StatusCode::OK, headers, csv))
 }
 
@@ -150,9 +261,21 @@ pub async fn adoption_conversion(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let t = &tid.0;
     let animals: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM intake_records WHERE intake_type = 'animal'")
-        .fetch_one(&state.db).await.map_err(db_err(t))?;
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err(t))?;
     let adopted: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM intake_records WHERE status = 'adopted'")
-        .fetch_one(&state.db).await.map_err(db_err(t))?;
-    let rate = if animals.0 > 0 { (adopted.0 as f64) / (animals.0 as f64) } else { 0.0 };
-    Ok(Json(serde_json::json!({"total": animals.0, "adopted": adopted.0, "conversion_rate": rate})))
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err(t))?;
+    let rate = if animals.0 > 0 {
+        (adopted.0 as f64) / (animals.0 as f64)
+    } else {
+        0.0
+    };
+    Ok(Json(serde_json::json!({
+        "total": animals.0,
+        "adopted": adopted.0,
+        "conversion_rate": rate,
+    })))
 }

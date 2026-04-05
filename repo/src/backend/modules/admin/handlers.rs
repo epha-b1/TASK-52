@@ -88,6 +88,14 @@ pub async fn rollback(
     let res = sqlx::query("INSERT INTO config_versions (snapshot, saved_by) VALUES (?, ?)")
         .bind(&snap).bind(&user.user_id).execute(&state.db).await.map_err(db_err(t))?;
 
+    // Keep the cap at CONFIG_VERSION_CAP rows after rollback too — otherwise
+    // repeated rollback calls could unbound the table.
+    sqlx::query(&format!(
+        "DELETE FROM config_versions WHERE id NOT IN (SELECT id FROM config_versions ORDER BY id DESC LIMIT {})",
+        CONFIG_VERSION_CAP
+    ))
+    .execute(&state.db).await.ok();
+
     crate::modules::audit::write(
         &state.db, &user.user_id, "admin.config.rollback", "config", &version_id.to_string(), t,
     ).await;
@@ -139,13 +147,26 @@ pub async fn export_diagnostics(
         })).collect::<Vec<_>>()
     ).unwrap_or_else(|_| "[]".into());
 
-    let cfg_rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, saved_by, created_at FROM config_versions ORDER BY id DESC"
+    // Full config snapshots (id, saved_by, created_at, snapshot payload).
+    // The complete snapshot body is included so operators can diff versions
+    // or roll back from a recovered package — metadata alone wouldn't
+    // satisfy the "config history" requirement.
+    let cfg_rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, saved_by, created_at, snapshot FROM config_versions ORDER BY id DESC"
     ).fetch_all(&state.db).await.map_err(db_err(t))?;
     let cfg_json = serde_json::to_string_pretty(
-        &cfg_rows.iter().map(|(i, by, at)| serde_json::json!({
-            "id": i, "saved_by": by, "created_at": at
-        })).collect::<Vec<_>>()
+        &cfg_rows.iter().map(|(i, by, at, snap)| {
+            // Snapshot is stored as a JSON string; parse it so the export
+            // is structurally readable (embedded object, not escaped text).
+            let parsed: serde_json::Value = serde_json::from_str(snap)
+                .unwrap_or_else(|_| serde_json::Value::String(snap.clone()));
+            serde_json::json!({
+                "id": i,
+                "saved_by": by,
+                "created_at": at,
+                "snapshot": parsed,
+            })
+        }).collect::<Vec<_>>()
     ).unwrap_or_else(|_| "[]".into());
 
     let audit_rows: Vec<(String, i64)> = sqlx::query_as(
@@ -227,6 +248,28 @@ pub async fn download_diagnostics(
     Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
 }
 
+// GET /admin/logs — last 200 structured_logs rows. Admin only.
+// Used for operator inspection and to prove the persistent log trail.
+pub async fn list_logs(
+    State(state): State<AppState>,
+    Extension(tid): Extension<TraceId>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let t = &tid.0;
+    let rows: Vec<(i64, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, level, message, trace_id, created_at FROM structured_logs \
+         ORDER BY id DESC LIMIT 200"
+    ).fetch_all(&state.db).await.map_err(db_err(t))?;
+    Ok(Json(rows.into_iter().map(|(id, lvl, msg, tid_opt, at)| {
+        serde_json::json!({
+            "id": id,
+            "level": lvl,
+            "message": msg,
+            "trace_id": tid_opt,
+            "created_at": at,
+        })
+    }).collect()))
+}
+
 // GET /admin/jobs
 pub async fn jobs(
     State(state): State<AppState>,
@@ -238,6 +281,95 @@ pub async fn jobs(
     ).fetch_all(&state.db).await.map_err(db_err(t))?;
     Ok(Json(rows.into_iter().map(|(name, status, count, last)|
         serde_json::json!({"job_name": name, "status": status, "run_count": count, "last_run_at": last})).collect()))
+}
+
+// ── Manual account purge trigger ──────────────────────────────────────
+//
+// Admin operator tool. Runs the same purge logic used by the hourly
+// background job so operators can respond to GDPR deletion requests
+// immediately once the 7-day cooling-off window has lapsed. The
+// `grace_period_days` body field defaults to 7 and is also the only way
+// the integration tests can drive the purge deterministically without
+// advancing the wall clock.
+
+#[derive(serde::Deserialize, Default)]
+pub struct AccountPurgeRequest {
+    #[serde(default)]
+    pub grace_period_days: Option<i64>,
+}
+
+pub async fn run_account_purge(
+    State(state): State<AppState>,
+    Extension(tid): Extension<TraceId>,
+    Extension(user): Extension<SessionUser>,
+    body: Option<Json<AccountPurgeRequest>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let t = &tid.0;
+    let days = body.and_then(|b| b.0.grace_period_days).unwrap_or(7);
+    if days < 0 {
+        return Err(AppError::validation("grace_period_days must be >= 0", t));
+    }
+
+    let purged = crate::jobs::run_account_purge(&state.db, days).await
+        .map_err(|e| {
+            tracing::error!(trace_id = %t, error = %e, "manual purge failed");
+            AppError::internal("Internal server error", t)
+        })?;
+
+    crate::modules::audit::write(
+        &state.db, &user.user_id, "admin.account.purge", "account_purge",
+        &format!("purged={}", purged), t,
+    ).await;
+
+    Ok(Json(serde_json::json!({
+        "message": "Account purge run complete",
+        "purged": purged,
+        "grace_period_days": days,
+    })))
+}
+
+// ── Manual evidence retention trigger ─────────────────────────────────
+//
+// Admin operator tool. Runs the same retention logic as the hourly
+// background job so operators can respond to retention policy changes
+// immediately. Integration tests use `max_age_days: 0` to make the sweep
+// deterministic — inserting evidence just before the call, the `<=` in
+// the predicate matches same-second inserts.
+
+#[derive(serde::Deserialize, Default)]
+pub struct RetentionPurgeRequest {
+    #[serde(default)]
+    pub max_age_days: Option<i64>,
+}
+
+pub async fn run_evidence_retention(
+    State(state): State<AppState>,
+    Extension(tid): Extension<TraceId>,
+    Extension(user): Extension<SessionUser>,
+    body: Option<Json<RetentionPurgeRequest>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let t = &tid.0;
+    let days = body.and_then(|b| b.0.max_age_days).unwrap_or(365);
+    if days < 0 {
+        return Err(AppError::validation("max_age_days must be >= 0", t));
+    }
+
+    let deleted = crate::jobs::run_evidence_retention(&state.db, days).await
+        .map_err(|e| {
+            tracing::error!(trace_id = %t, error = %e, "manual retention sweep failed");
+            AppError::internal("Internal server error", t)
+        })?;
+
+    crate::modules::audit::write(
+        &state.db, &user.user_id, "admin.evidence.retention_sweep", "retention",
+        &format!("deleted={}", deleted), t,
+    ).await;
+
+    Ok(Json(serde_json::json!({
+        "message": "Retention sweep complete",
+        "deleted": deleted,
+        "max_age_days": days,
+    })))
 }
 
 // ── REAL transactional key rotation ───────────────────────────────────

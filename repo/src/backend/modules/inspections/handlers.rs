@@ -4,7 +4,7 @@ use axum::{Extension, Json};
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::common::{db_err, require_write_role};
+use crate::common::{db_err, require_write_role, slog};
 use crate::error::AppError;
 use crate::extractors::SessionUser;
 use crate::middleware::trace_id::TraceId;
@@ -88,6 +88,30 @@ pub async fn resolve(
     crate::modules::audit::write(
         &state.db, &user.user_id, "inspection.resolve", "inspection", &id, t,
     ).await;
+    slog(&state.db, "info",
+        &format!("inspection.resolve id={} status={}", id, body.status), t).await;
+
+    // If this inspection is linked (via an evidence_link → intake/
+    // traceability chain) to a traceability code, append a step to its
+    // timeline. We do a best-effort lookup: any traceability_codes row
+    // whose intake_id matches this inspection's intake_id gets a step.
+    let intake_id: Option<(String,)> =
+        sqlx::query_as("SELECT intake_id FROM inspections WHERE id = ?")
+            .bind(&id).fetch_optional(&state.db).await.ok().flatten();
+    if let Some((iid,)) = intake_id {
+        let codes: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM traceability_codes WHERE intake_id = ?")
+                .bind(&iid).fetch_all(&state.db).await.unwrap_or_default();
+        for (code_id,) in codes {
+            crate::modules::traceability::handlers::append_step(
+                &state.db,
+                &code_id,
+                "inspection",
+                &format!("Inspection {}", body.status),
+                &format!("inspection_id={} notes={}", id, body.outcome_notes),
+            ).await;
+        }
+    }
 
     Ok(Json(serde_json::json!({"message": "Inspection resolved"})))
 }

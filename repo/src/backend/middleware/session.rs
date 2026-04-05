@@ -40,7 +40,8 @@ async fn validate_session(db: &SqlitePool, session_id: &str) -> Option<SessionUs
     let row = sqlx::query_as::<_, SessionRow>(
         "SELECT s.id, s.user_id, u.username, u.role \
          FROM sessions s JOIN users u ON s.user_id = u.id \
-         WHERE s.id = ? AND s.last_active > datetime('now', '-30 minutes')",
+         WHERE s.id = ? AND s.last_active > datetime('now', '-30 minutes') \
+           AND u.anonymized = 0",
     )
     .bind(session_id)
     .fetch_optional(db)

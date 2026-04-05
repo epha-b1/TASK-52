@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::common::db_err;
+use crate::common::{db_err, slog};
 use crate::error::AppError;
 use crate::extractors::SessionUser;
 use crate::middleware::trace_id::TraceId;
@@ -24,7 +24,7 @@ pub async fn register(
 ) -> Result<impl IntoResponse, AppError> {
     let t = &tid.0;
 
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE anonymized = 0")
         .fetch_one(&state.db)
         .await
         .map_err(db_err(t))?;
@@ -92,7 +92,8 @@ pub async fn login(
     check_lockout(&state.db, &body.username, t).await?;
 
     let row = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?",
+        "SELECT id, username, password_hash, role, created_at FROM users \
+         WHERE username = ? AND anonymized = 0",
     )
     .bind(&body.username)
     .fetch_optional(&state.db)
@@ -103,12 +104,16 @@ pub async fn login(
         Some(u) => u,
         None => {
             record_failure(&state.db, &body.username).await;
+            slog(&state.db, "warn",
+                &format!("auth.login failed (user not found) username={}", body.username), t).await;
             return Err(AppError::unauthorized("Invalid credentials", t));
         }
     };
 
     if !verify_password(&body.password, &user_row.password_hash) {
         record_failure(&state.db, &body.username).await;
+        slog(&state.db, "warn",
+            &format!("auth.login failed (bad password) username={}", body.username), t).await;
         return Err(AppError::unauthorized("Invalid credentials", t));
     }
 

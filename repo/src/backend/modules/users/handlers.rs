@@ -20,7 +20,8 @@ pub async fn list_users(
 ) -> Result<Json<Vec<UserResponse>>, AppError> {
     let t = &tid.0;
     let rows = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, role, created_at FROM users ORDER BY created_at",
+        "SELECT id, username, role, created_at FROM users \
+         WHERE anonymized = 0 ORDER BY created_at",
     )
     .fetch_all(&state.db)
     .await

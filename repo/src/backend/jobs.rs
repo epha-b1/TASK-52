@@ -69,61 +69,97 @@ async fn account_deletion_purge_loop(db: SqlitePool) {
     let mut ticker = tokio::time::interval(Duration::from_secs(3600));
     loop {
         ticker.tick().await;
-        // Purge users who requested deletion more than 7 days ago.
-        // Delete dependent rows first to satisfy FKs. Audit logs remain
-        // but the actor_id is anonymized via overwrite.
-        let tx = db.begin().await;
-        match tx {
-            Ok(mut tx) => {
-                // Collect victim ids
-                let victims: Result<Vec<(String,)>, _> = sqlx::query_as(
-                    "SELECT id FROM users WHERE deletion_requested_at IS NOT NULL \
-                     AND deletion_requested_at < datetime('now', '-7 days')"
-                ).fetch_all(&mut *tx).await;
-                let ids = match victims {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(job = "account_deletion_purge", error = %e, "scan failed");
-                        record_run(&db, "account_deletion_purge", "error", Some(e.to_string())).await;
-                        continue;
-                    }
-                };
-
-                let mut purged = 0usize;
-                let mut hard_err: Option<String> = None;
-                for (uid,) in &ids {
-                    // anonymize audit log actor references
-                    if let Err(e) = sqlx::query("UPDATE audit_logs SET actor_id = NULL WHERE actor_id = ?")
-                        .bind(uid).execute(&mut *tx).await
-                    { hard_err = Some(e.to_string()); break; }
-                    // drop dependent rows
-                    let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?").bind(uid).execute(&mut *tx).await;
-                    let _ = sqlx::query("DELETE FROM address_book WHERE user_id = ?").bind(uid).execute(&mut *tx).await;
-                    // finally the user
-                    if let Err(e) = sqlx::query("DELETE FROM users WHERE id = ?").bind(uid).execute(&mut *tx).await {
-                        hard_err = Some(e.to_string()); break;
-                    }
-                    purged += 1;
-                }
-
-                if let Some(e) = hard_err {
-                    let _ = tx.rollback().await;
-                    tracing::error!(job = "account_deletion_purge", error = %e, "purge failed, rolled back");
-                    record_run(&db, "account_deletion_purge", "error", Some(e)).await;
-                } else if let Err(e) = tx.commit().await {
-                    tracing::error!(job = "account_deletion_purge", error = %e, "commit failed");
-                    record_run(&db, "account_deletion_purge", "error", Some(e.to_string())).await;
-                } else {
-                    tracing::info!(job = "account_deletion_purge", purged, "purge run");
-                    record_run(&db, "account_deletion_purge", "ok", None).await;
-                }
+        match run_account_purge(&db, 7).await {
+            Ok(purged) => {
+                tracing::info!(job = "account_deletion_purge", purged, "purge run");
+                record_run(&db, "account_deletion_purge", "ok", None).await;
             }
             Err(e) => {
-                tracing::error!(job = "account_deletion_purge", error = %e, "tx begin failed");
-                record_run(&db, "account_deletion_purge", "error", Some(e.to_string())).await;
+                tracing::error!(job = "account_deletion_purge", error = %e, "purge failed");
+                record_run(&db, "account_deletion_purge", "error", Some(e)).await;
             }
         }
     }
+}
+
+/// Runs a single purge pass transactionally. Anonymizes eligible users
+/// (deletion_requested_at older than `grace_period_days`) instead of
+/// hard-deleting, preserving every FK reference. Personal data (address
+/// book entries, sessions, username) is wiped.
+///
+/// Returns the number of users anonymized or an error string on failure.
+/// Safe to call directly from an admin endpoint — rolls back on any error.
+pub async fn run_account_purge(db: &SqlitePool, grace_period_days: i64) -> Result<usize, String> {
+    let threshold = format!("-{} days", grace_period_days);
+
+    // Collect victim ids with a read (no lock needed).
+    let victims: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM users \
+         WHERE anonymized = 0 \
+           AND deletion_requested_at IS NOT NULL \
+           AND deletion_requested_at <= datetime('now', ?)",
+    )
+    .bind(&threshold)
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if victims.is_empty() { return Ok(0); }
+
+    // Transactional anonymization.
+    let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+
+    let mut purged = 0usize;
+    for (uid,) in &victims {
+        // Generate a unique anonymized username. Collisions are unlikely but
+        // we use a UUID segment to guarantee uniqueness against the UNIQUE
+        // constraint on users.username.
+        let anon_username = format!("anon-{}", uuid::Uuid::new_v4());
+
+        // Wipe personal data: address book is personal, drop it entirely.
+        sqlx::query("DELETE FROM address_book WHERE user_id = ?")
+            .bind(uid).execute(&mut *tx).await
+            .map_err(|e| e.to_string())?;
+
+        // Drop active sessions so the soon-to-be-anonymized user is kicked out.
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(uid).execute(&mut *tx).await
+            .map_err(|e| e.to_string())?;
+
+        // Null out nullable actor references where we can (they point back
+        // to a real person otherwise). checkin_ledger.override_by is nullable.
+        sqlx::query("UPDATE checkin_ledger SET override_by = NULL WHERE override_by = ?")
+            .bind(uid).execute(&mut *tx).await
+            .map_err(|e| e.to_string())?;
+
+        // audit_logs.actor_id is nullable too — drop the link.
+        sqlx::query("UPDATE audit_logs SET actor_id = NULL WHERE actor_id = ?")
+            .bind(uid).execute(&mut *tx).await
+            .map_err(|e| e.to_string())?;
+
+        // Finally flip the user row to its anonymized tombstone state. The
+        // row stays so NOT NULL FKs in intake_records, inspections,
+        // evidence_records, supply_entries, traceability_codes,
+        // traceability_events, config_versions remain valid. Password hash
+        // is set to a value that no password will ever verify against.
+        sqlx::query(
+            "UPDATE users \
+             SET username = ?, \
+                 password_hash = '$invalid$anonymized$', \
+                 anonymized = 1, \
+                 deletion_requested_at = NULL, \
+                 updated_at = datetime('now') \
+             WHERE id = ?"
+        )
+        .bind(&anon_username).bind(uid)
+        .execute(&mut *tx).await
+        .map_err(|e| e.to_string())?;
+
+        purged += 1;
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(purged)
 }
 
 // ── Diagnostics ZIP cleanup ───────────────────────────────────────────
@@ -170,15 +206,101 @@ pub fn cleanup_old_files(dir: &std::path::Path, max_age_secs: u64) -> usize {
     count
 }
 
-// ── Evidence retention (placeholder — retains all by default) ─────────
+// ── Evidence retention ────────────────────────────────────────────────
 
 async fn evidence_retention_loop(db: SqlitePool) {
     tracing::info!(job = "evidence_retention", "Registered (every 1h)");
     let mut ticker = tokio::time::interval(Duration::from_secs(3600));
     loop {
         ticker.tick().await;
-        // No deletion by default; legal_hold rows never expire.
-        // The job still records a run for visibility.
-        record_run(&db, "evidence_retention", "ok", None).await;
+        match run_evidence_retention(&db, 365).await {
+            Ok(deleted) => {
+                tracing::info!(job = "evidence_retention", deleted, "retention sweep");
+                record_run(&db, "evidence_retention", "ok", None).await;
+            }
+            Err(e) => {
+                tracing::error!(job = "evidence_retention", error = %e, "sweep failed");
+                record_run(&db, "evidence_retention", "error", Some(e)).await;
+            }
+        }
     }
+}
+
+/// Transactionally deletes evidence older than `max_age_days` whose
+/// `linked = 0 AND legal_hold = 0`. Returns the number of rows deleted.
+///
+/// Legal-hold rows and rows linked to another resource (intake/inspection/
+/// traceability/checkin) are always preserved regardless of age. Related
+/// upload_sessions for the same uploader that are also older than the
+/// threshold are opportunistically dropped to avoid unbounded growth.
+///
+/// Callable from the background loop and from the admin endpoint
+/// `POST /admin/retention-purge` (GDPR/operator tool + deterministic test
+/// driver via `max_age_days: 0`).
+pub async fn run_evidence_retention(db: &SqlitePool, max_age_days: i64) -> Result<usize, String> {
+    if max_age_days < 0 {
+        return Err("max_age_days must be >= 0".into());
+    }
+    let threshold = format!("-{} days", max_age_days);
+
+    // Snapshot victims before deletion so we can (a) log how many we touched
+    // and (b) emit an auditable structured log entry per row.
+    let victims: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM evidence_records \
+         WHERE linked = 0 \
+           AND legal_hold = 0 \
+           AND created_at <= datetime('now', ?)",
+    )
+    .bind(&threshold)
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if victims.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+
+    // Defensive: re-check inside the tx to avoid races with a concurrent
+    // link/legal-hold flip. Using the same predicate guarantees we never
+    // delete a row that just became linked or placed on legal hold.
+    let res = sqlx::query(
+        "DELETE FROM evidence_records \
+         WHERE linked = 0 \
+           AND legal_hold = 0 \
+           AND created_at <= datetime('now', ?)",
+    )
+    .bind(&threshold)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let deleted = res.rows_affected() as usize;
+
+    // Clean completed/expired upload sessions older than the threshold too.
+    // These are short-lived scratch rows that never reach 365 days under
+    // normal operation, but if a client abandons an upload they otherwise
+    // accumulate forever.
+    sqlx::query(
+        "DELETE FROM upload_sessions \
+         WHERE created_at <= datetime('now', ?)"
+    )
+    .bind(&threshold)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    // Structured log entry (one row) so retention runs are visible in
+    // /admin/logs and the diagnostic ZIP. We deliberately only log counts —
+    // individual evidence IDs would bloat the log table.
+    crate::common::slog(
+        db,
+        "info",
+        &format!("evidence_retention deleted={} victims={}", deleted, victims.len()),
+        "job",
+    ).await;
+
+    Ok(deleted)
 }

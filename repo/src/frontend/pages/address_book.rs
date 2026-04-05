@@ -1,6 +1,9 @@
 use leptos::*;
 use crate::api::client;
+use crate::draft;
 use fieldtrace_shared::{AddressRequest, AddressResponse};
+
+const ADDRESS_FORM_ID: &str = "address-form";
 
 #[component]
 pub fn AddressBookPage() -> impl IntoView {
@@ -67,13 +70,29 @@ pub fn AddressBookPage() -> impl IntoView {
 
 #[component]
 fn AddressForm<F: Fn() + Clone + 'static>(on_done: F) -> impl IntoView {
-    let (label, set_label) = create_signal(String::new());
-    let (street, set_street) = create_signal(String::new());
-    let (city, set_city) = create_signal(String::new());
-    let (st, set_st) = create_signal(String::new());
-    let (zip, set_zip) = create_signal(String::new());
-    let (phone, set_phone) = create_signal(String::new());
+    // Restore from any draft preserved across session expiry.
+    let restored = draft::load_draft(ADDRESS_FORM_ID);
+    let pick = |key: &str| -> String {
+        restored.as_ref()
+            .and_then(|v| v.get(key).and_then(|s| s.as_str().map(String::from)))
+            .unwrap_or_default()
+    };
+    let (label, set_label) = create_signal(pick("label"));
+    let (street, set_street) = create_signal(pick("street"));
+    let (city, set_city) = create_signal(pick("city"));
+    let (st, set_st) = create_signal(pick("state"));
+    let (zip, set_zip) = create_signal(pick("zip_plus4"));
+    let (phone, set_phone) = create_signal(pick("phone"));
     let (err, set_err) = create_signal(Option::<String>::None);
+
+    // Autosave every field on input change.
+    create_effect(move |_| {
+        let snap = serde_json::json!({
+            "label": label.get(), "street": street.get(), "city": city.get(),
+            "state": st.get(), "zip_plus4": zip.get(), "phone": phone.get(),
+        });
+        draft::save_draft(ADDRESS_FORM_ID, snap);
+    });
 
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
@@ -85,7 +104,10 @@ fn AddressForm<F: Fn() + Clone + 'static>(on_done: F) -> impl IntoView {
         let on_done = on_done.clone();
         spawn_local(async move {
             match client::create_address(&req).await {
-                Ok(_) => on_done(),
+                Ok(_) => {
+                    draft::clear_draft(ADDRESS_FORM_ID);
+                    on_done();
+                }
                 Err(e) => set_err.set(Some(e.message)),
             }
         });

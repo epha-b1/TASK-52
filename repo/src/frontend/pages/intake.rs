@@ -1,6 +1,9 @@
 use leptos::*;
 use crate::api::client;
+use crate::draft;
 use fieldtrace_shared::{IntakeRequest, IntakeResponse};
+
+const INTAKE_FORM_ID: &str = "intake-form";
 
 #[component]
 pub fn IntakePage() -> impl IntoView {
@@ -13,6 +16,12 @@ pub fn IntakePage() -> impl IntoView {
         });
     };
     refresh();
+
+    // If a draft is present (from a previous session that timed out)
+    // open the form automatically so the user sees their preserved input.
+    if draft::load_draft(INTAKE_FORM_ID).is_some() {
+        set_show_form.set(true);
+    }
 
     view! {
         <div class="card">
@@ -48,17 +57,48 @@ pub fn IntakePage() -> impl IntoView {
 
 #[component]
 fn IntakeForm<F: Fn() + Clone + 'static>(on_done: F) -> impl IntoView {
-    let (itype, set_itype) = create_signal("animal".to_string());
-    let (details, set_details) = create_signal(String::new());
+    // Seed from any preserved draft. This is what makes a forced re-login
+    // round-trip with the user's typing still in the form.
+    let restored = draft::load_draft(INTAKE_FORM_ID);
+    let pick = |k: &str, default: &str| -> String {
+        restored.as_ref()
+            .and_then(|v| v.get(k).and_then(|s| s.as_str().map(String::from)))
+            .unwrap_or_else(|| default.to_string())
+    };
+
+    let (itype, set_itype) = create_signal(pick("intake_type", "animal"));
+    let (details, set_details) = create_signal(pick("details", ""));
+    let (region, set_region) = create_signal(pick("region", ""));
+    let (tags, set_tags) = create_signal(pick("tags", ""));
     let (err, set_err) = create_signal(Option::<String>::None);
+
+    // Autosave on every field change. Cheap — just a JSON write to
+    // localStorage.
+    create_effect(move |_| {
+        let snapshot = serde_json::json!({
+            "intake_type": itype.get(),
+            "details": details.get(),
+            "region": region.get(),
+            "tags": tags.get(),
+        });
+        draft::save_draft(INTAKE_FORM_ID, snapshot);
+    });
 
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        let req = IntakeRequest { intake_type: itype.get(), details: details.get() };
+        let req = IntakeRequest {
+            intake_type: itype.get(),
+            details: details.get(),
+            region: region.get(),
+            tags: tags.get(),
+        };
         let on_done = on_done.clone();
         spawn_local(async move {
             match client::create_intake(&req).await {
-                Ok(_) => on_done(),
+                Ok(_) => {
+                    draft::clear_draft(INTAKE_FORM_ID);
+                    on_done();
+                }
                 Err(e) => set_err.set(Some(e.message)),
             }
         });
@@ -74,6 +114,10 @@ fn IntakeForm<F: Fn() + Clone + 'static>(on_done: F) -> impl IntoView {
             </select>
             <input placeholder="Details (JSON)" prop:value=details
                 on:input=move |e| set_details.set(event_target_value(&e)) />
+            <input placeholder="Region (e.g. north, warehouse-2)" prop:value=region
+                on:input=move |e| set_region.set(event_target_value(&e)) />
+            <input placeholder="Tags (comma-separated)" prop:value=tags
+                on:input=move |e| set_tags.set(event_target_value(&e)) />
             <button type="submit" class="btn">"Create Intake"</button>
         </form>
     }

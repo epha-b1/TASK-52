@@ -15,4 +15,6 @@ gloo-net = "0.6"
 gloo-timers = { version = "0.3", features = ["futures"] }
 console_error_panic_hook = "0.1"
 wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Storage", "Window", "Location", "History"] }
+wasm-bindgen = "0.2"
 fieldtrace-shared = { path = "../shared" }

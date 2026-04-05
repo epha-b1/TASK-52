@@ -106,6 +106,14 @@ echo "[Step 8] Remediation suite (audit fixes)..."
 reset_db
 run_suite "Remediation" "API_tests/remediation_api_test.sh"
 
+echo "[Step 9] Blockers suite (final acceptance)..."
+reset_db
+run_suite "Blockers" "API_tests/blockers_api_test.sh"
+
+echo "[Step 10] Frontend draft + session-restore integration..."
+reset_db
+run_suite "FrontendDraft" "API_tests/frontend_draft_test.sh"
+
 # Summary
 echo "========================================"
 if [ $TOTAL_FAIL -eq 0 ]; then

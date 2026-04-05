@@ -18,6 +18,20 @@ impl std::fmt::Display for ApiError {
 
 async fn parse_error(resp: gloo_net::http::Response) -> ApiError {
     let status = resp.status();
+    // Session expired mid-action: flash a user-visible message and preserve
+    // the current route so the app shell can restore the same page after
+    // re-login. Any active draft stays in localStorage untouched.
+    if status == 401 {
+        crate::draft::flash_session_expired();
+        // Best-effort route capture — the browser's location hash/path is
+        // what the app shell uses as its route key.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(w) = web_sys::window() {
+            if let Ok(p) = w.location().pathname() {
+                crate::draft::preserve_route(&p);
+            }
+        }
+    }
     match resp.json::<ErrorResponse>().await {
         Ok(e) => ApiError { status: e.status, code: e.code, message: e.message },
         Err(_) => ApiError { status, code: "UNKNOWN".into(), message: format!("HTTP {}", status) },
@@ -122,6 +136,15 @@ pub async fn create_intake(req: &IntakeRequest) -> Result<IntakeResponse, ApiErr
         .body(serde_json::to_string(req).unwrap())
         .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
         .send().await.map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Transfers ────────────────────────────────────────────────────────
+
+pub async fn list_transfers() -> Result<Vec<TransferResponse>, ApiError> {
+    let resp = Request::get("/transfers").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
     if !resp.ok() { return Err(parse_error(resp).await); }
     resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
 }

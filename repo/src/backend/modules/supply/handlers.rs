@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::common::{db_err, require_write_role};
+use crate::common::{db_err, require_write_role, slog};
 use crate::error::AppError;
 use crate::extractors::SessionUser;
 use crate::middleware::trace_id::TraceId;
@@ -64,6 +64,9 @@ pub async fn create(
     .bind(&body.notes).bind(parse_status).bind(&conflicts_json).bind(&user.user_id)
     .execute(&state.db).await
     .map_err(db_err(t))?;
+
+    slog(&state.db, "info",
+        &format!("supply.create id={} parse_status={}", id, parse_status), t).await;
 
     Ok((StatusCode::CREATED, Json(SupplyResponse {
         id, name: body.name, sku: body.sku,

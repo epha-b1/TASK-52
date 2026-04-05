@@ -15,16 +15,18 @@ RUN rustup target add wasm32-unknown-unknown
 # Copy everything and build directly — no dep caching tricks
 COPY . .
 RUN cd src/frontend && trunk build
-# Run Rust unit tests for the backend crate as part of the build.
-# Includes tests for: common::CivilDateTime, crypto AES round-trip, error
-# envelope flattening, zip writer, traceability code checksum, supply parser.
-RUN cargo test --release -p fieldtrace-backend
+# Run Rust unit tests for backend + shared as part of the build.
+# Backend tests cover: common::CivilDateTime, crypto AES round-trip, error
+# envelope flattening, zip writer, traceability code checksum, supply parser,
+# evidence compression policy, log sanitizer. Shared tests cover the draft
+# autosave serialization + key constants used by the frontend.
+RUN cargo test --release -p fieldtrace-backend -p fieldtrace-shared
 RUN cargo build --release -p fieldtrace-backend
 
 # === Runtime stage ===
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
-    libsqlite3-0 wget curl ca-certificates bash \
+    libsqlite3-0 wget curl ca-certificates bash unzip jq \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

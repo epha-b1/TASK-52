@@ -121,20 +121,124 @@ All environment variables are defined inline in `docker-compose.yml`. No `.env` 
 |---|---|---|---|
 | Create/update intake, inspections, evidence, supply, check-in, members | ✔ | ✔ | ✖ 403 |
 | Delete own unlinked evidence | ✔ | only uploader | ✖ 403 |
+| **Create traceability code** (`POST /traceability`) | ✔ | ✔ | **✖ 403** |
 | Publish / retract traceability | ✔ | ✖ 403 | ✔ |
+| Append manual traceability step | ✔ | ✔ | ✖ 403 |
+| Create / update transfers | ✔ | ✔ | ✖ 403 |
+| Record stock movements | ✔ | ✔ | ✖ 403 |
 | CSV reports export / audit log export | ✔ | ✖ 403 | ✔ |
 | User management, admin config, diagnostics, key rotation | ✔ | ✖ 403 | ✖ 403 |
 | Legal hold toggle on evidence | ✔ | ✖ 403 | ✖ 403 |
 | Anti-passback override at `/checkin` | ✔ | ✖ 403 | ✖ 403 |
 
-### Account deletion (cooling-off)
+> **Auditor scope**: read-only across every operational resource, PLUS
+> the two explicit write exceptions `POST /traceability/:id/publish` and
+> `POST /traceability/:id/retract`. Auditors cannot create traceability
+> codes, append manual steps, move transfers, or record stock movements.
 
-- `POST /account/delete` schedules deletion in 7 days. You can still log in.
+## Transfer lifecycle
+
+Transfers are first-class records (`transfers` table) with their own
+state machine:
+
+```
+queued ──► approved ──► in_transit ──► received
+  │           │              │
+  └───────────┴──────────────┴────► canceled
+```
+
+Any other transition returns `409 CONFLICT`. Endpoints:
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| GET    | `/transfers` | session | List all transfers (newest first) |
+| POST   | `/transfers` | admin/staff | Create in `queued` state |
+| GET    | `/transfers/:id` | session | Get a single transfer |
+| PATCH  | `/transfers/:id/status` | admin/staff | Update status (state machine enforced) |
+
+The workspace Transfer Queue consumes `/transfers` directly — it no
+longer filters intake-status as a shortcut.
+
+## Stock movements and inventory
+
+`inventory_on_hand` is computed from the `stock_movements` append-only
+ledger, **not** `COUNT(supply_entries)`. Every receipt, allocation,
+adjustment, return, or loss is one signed row:
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| GET    | `/stock/movements` | session | List movements (filter by `supply_id`, `reason`) |
+| POST   | `/stock/movements` | admin/staff | Record one movement |
+| GET    | `/stock/inventory` | session | `{ total_on_hand, by_supply }` snapshot |
+
+Sign policy is enforced server-side:
+
+| Reason       | Allowed sign          |
+| ------------ | --------------------- |
+| `receipt`    | positive only         |
+| `return`     | positive only         |
+| `allocation` | negative only         |
+| `loss`       | negative only         |
+| `adjustment` | either (reconciliation) |
+
+Zero deltas and unknown reasons return `400 VALIDATION_ERROR`.
+
+## Dashboard filter set
+
+`/reports/summary` and `/reports/export` honor the same filter keys:
+
+| Query param    | Type       | Matches                                           |
+| -------------- | ---------- | ------------------------------------------------- |
+| `from`, `to`   | ISO date   | `intake_records.created_at` range                 |
+| `status`       | exact      | intake status                                     |
+| `intake_type`  | exact      | `animal \| supply \| donation`                    |
+| `region`       | exact      | `intake_records.region`                           |
+| `tags`         | substring  | CSV match against `intake_records.tags`           |
+| `q`            | substring  | full-text across `details`, `region`, `tags`      |
+
+CSV export echoes `filter_region`, `filter_tags`, and `filter_q` so
+operators can reproduce any downloaded report.
+
+## Traceability timeline
+
+Every traceability code has an append-only `traceability_steps`
+timeline. Steps are written automatically on:
+
+- `create` — code generated
+- `publish` — version bumped + comment
+- `retract` — version bumped + comment
+- `inspection` — when a linked inspection resolves
+
+Plus manual operator notes via `POST /traceability/:id/steps` (admin/staff only).
+
+Retrieve via `GET /traceability/:id/steps` — returns the ordered list
+as `TraceStepResponse` rows.
+
+### Account deletion (cooling-off + FK-safe anonymization)
+
+- `POST /account/delete` schedules deletion in 7 days. You can still log in
+  during the cooling-off window.
 - `POST /account/cancel-deletion` clears the pending request.
-- The `account_deletion_purge` background job runs hourly and removes
-  accounts whose `deletion_requested_at` is older than 7 days, transactionally
-  dropping their sessions and address book entries and anonymizing audit log
-  references.
+- **Anonymization, not hard delete.** When the 7-day window lapses, the
+  background job `account_deletion_purge` (hourly) — or the admin endpoint
+  `POST /admin/account-purge` (immediate, for GDPR response) — transactionally
+  strips the user's personal data:
+  1. Every `address_book` row for the user is deleted (personal data).
+  2. Every active session for the user is dropped.
+  3. `checkin_ledger.override_by` and `audit_logs.actor_id` references are
+     set to `NULL`.
+  4. The `users` row itself is rewritten in place: `username` rotated to
+     `anon-<uuid>`, `password_hash` replaced with `$invalid$anonymized$`,
+     `anonymized = 1`, `deletion_requested_at = NULL`.
+  - Because the row still exists, every `NOT NULL` FK in `intake_records`,
+    `inspections`, `evidence_records`, `supply_entries`, `traceability_codes`,
+    `traceability_events`, and `config_versions` remains valid — the history
+    is preserved for audit, but no longer traceable to a natural person.
+  - Login, register, and admin user listing all filter `WHERE anonymized = 0`
+    so the tombstone is invisible to every public-facing code path.
+- Operator immediate purge: `POST /admin/account-purge` with
+  `{"grace_period_days": N}` (default `7`). Admin only. Runs the same
+  transactional logic and returns the number of users anonymized.
 
 ### Idempotency
 
@@ -152,14 +256,101 @@ commits in a single SQLite transaction. The in-memory cipher is replaced
 only after commit. If `ENCRYPTION_KEY_FILE` is configured, the new key is
 atomically written there as well.
 
+### Evidence retention (365 days)
+
+Evidence records are kept forever by default unless they satisfy all three
+conditions:
+
+1. `created_at` is older than the retention window (default 365 days).
+2. `linked = 0` — the row is not attached to any intake, inspection,
+   traceability code, or check-in event.
+3. `legal_hold = 0` — the admin has not placed the row on legal hold.
+
+Enforcement happens in two places:
+
+- **Background job** `evidence_retention` runs hourly and calls
+  `jobs::run_evidence_retention(db, 365)`. Deletions happen in a single
+  SQLite transaction that re-checks the `linked` and `legal_hold` flags
+  inside the tx to avoid races with concurrent link/hold flips. A
+  `structured_logs` row is emitted per run showing the delete count.
+- **Admin endpoint** `POST /admin/retention-purge` with
+  `{"max_age_days": N}` (default 365, min 0) runs the same logic
+  immediately — integration tests use `max_age_days: 0` to drive a
+  deterministic same-second sweep.
+
+### Local media compression
+
+Every `POST /media/upload/complete` runs the payload size through
+`apply_compression_policy(media_type, original_bytes)` before insert.
+The policy is deterministic per media type:
+
+| Media type | Target ratio | Floor (skip below) |
+| ---------- | ------------ | ------------------- |
+| `photo`    | 0.70         | 256 KiB             |
+| `video`    | 0.60         | 2 MiB               |
+| `audio`    | 0.50         | 128 KiB             |
+| other      | 1.00 (skip)  | —                   |
+
+Files at or below the per-type floor pass through unchanged
+(`compression_applied = false`). Above the floor the row is persisted with
+`compressed_bytes`, `compression_ratio`, `compression_applied` populated,
+and `EvidenceResponse` carries the same three fields back to the client.
+
+A guard rejects any compression result that produced a `compressed_bytes >
+size_bytes` to prevent an upstream policy bug from letting oversized
+"compressed" payloads through.
+
+### Draft autosave and session-expiry restore
+
+Intake and address-book forms autosave their inputs to `localStorage` on
+every change. The keys live under the `fieldtrace.draft.<form_id>` prefix
+defined in `fieldtrace-shared`.
+
+On any 401 response the API client:
+
+1. Calls `draft::flash_session_expired()` which stores a user-visible
+   banner message.
+2. Calls `draft::preserve_route(current_path)` so the app shell can land
+   the user back on the same page after re-login.
+
+On app mount, `draft::consume_session_flash()` surfaces the banner and
+each form's `load_draft(form_id)` re-seeds the signals from localStorage.
+`clear_draft(form_id)` runs on successful submit so the saved state does
+not linger after a successful post.
+
 ### Diagnostic package
 
 `POST /admin/diagnostics/export` builds a real ZIP (PKZIP "stored" method,
-no external dependencies) under `/app/storage/diagnostics/{id}.zip`
-containing recent structured logs, job metrics, config history, and an
-audit summary with sensitive fields redacted. Files older than 1 hour are
-removed by the `diagnostics_cleanup` background job. Download via
-`GET /admin/diagnostics/download/{id}`.
+no external dependencies) under `/app/storage/diagnostics/{id}.zip` and
+returns `{download_id, download_url, size_bytes, expires_in_seconds}`.
+
+The archive contains **four files**:
+
+| File                  | Content                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `logs.txt`            | Up to 5000 most-recent `structured_logs` rows from the last 7 days, one per line, with sensitive markers sanitized  |
+| `metrics.json`        | Up to 1000 most-recent `job_metrics` rows (job name, status, run count, last error, last run time)                  |
+| `config_history.json` | Every `config_versions` row with its **full snapshot payload** (not just metadata) so operators can diff or recover |
+| `audit_summary.csv`   | Aggregated `audit_logs` counts by action, sensitive payloads omitted                                                |
+
+Files older than 1 hour are removed by the `diagnostics_cleanup` background
+job. Download via `GET /admin/diagnostics/download/{id}`.
+
+### Structured logs
+
+Key backend operations (`intake.create`, `intake.status_update`,
+`inspection.resolve`, `evidence.upload_complete`, `supply.create`,
+`traceability.publish`, `traceability.retract`, and failed login attempts)
+write a row into the `structured_logs` table via `common::slog`. These
+rows are what the diagnostic ZIP's `logs.txt` is built from.
+
+The writer passes every message through `sanitize_log_message` which
+refuses to store anything containing known-sensitive markers (`password`,
+`$argon2`, `Bearer `, `Authorization:`, `token=`, `api_key=`, `session_id=`,
+`secret=`). Tampered messages are replaced with `[REDACTED: sensitive
+content blocked]` and capped to 2000 characters.
+
+Admin can inspect the log stream via `GET /admin/logs` (last 200 rows).
 
 ## Slices Implemented
 
@@ -180,4 +371,18 @@ removed by the `diagnostics_cleanup` background job. Download via
 
 ## Test Summary
 
-**91/91 tests passing** from cold start (`docker compose down -v` → `./run_tests.sh`).
+The orchestrator runs 9 suites:
+
+| Step | Suite              | Coverage                                                                 |
+| ---- | ------------------ | ------------------------------------------------------------------------ |
+| 3    | S1-Unit / S1-API   | Bootstrap + health + trace-id + static assets                            |
+| 4    | S2-Auth suites     | Registration bootstrap guard, login, lockout, session expiry             |
+| 5    | S3-AddrBook        | CRUD + encryption round-trip + object-level auth                         |
+| 6    | S4-Intake          | State machine transitions + inspection resolve-once                      |
+| 7    | S4-11-Full         | Cross-slice comprehensive (evidence, supply, traceability, checkin, dashboard, admin, audit) |
+| 8    | Remediation        | Audit-report fixes (auditor matrix, object-level auth, idempotency, key rotation, diagnostics) |
+| 9    | **Blockers**       | Final acceptance: address-book auditor lockout, FK-safe purge, config cap + rollback, diagnostic snapshot content, structured_logs writes, sensitive-leak prevention |
+
+Rust unit tests run during `docker compose build` (cargo test --release):
+civil-date formatter, AES round-trip + tamper, error envelope flatten,
+ZIP writer + CRC32, traceability checksum, supply parser, log sanitizer.

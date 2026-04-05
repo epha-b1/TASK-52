@@ -15,7 +15,54 @@
 
 use crate::error::AppError;
 use crate::extractors::SessionUser;
+use sqlx::SqlitePool;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// ── Structured log persistence ────────────────────────────────────────
+//
+// Writes a row into the `structured_logs` table. This is on top of the
+// `tracing` subscriber which emits JSON to stdout — the DB copy lets the
+// diagnostics ZIP bundle the last 7 days of local activity even when the
+// container's stdout history has been rotated.
+//
+// The caller is responsible for keeping `message` free of secrets.
+// `sanitize_message` below blocks obviously sensitive substrings as a
+// defense in depth.
+
+/// Substrings we never allow inside a structured_logs `message` field.
+const SENSITIVE_MARKERS: &[&str] = &[
+    "password", "Password", "PASSWORD",
+    "session_id=", "session=", "bearer ", "Bearer ",
+    "Authorization:", "authorization:",
+    "token=", "api_key=", "apikey=",
+    "$argon2", "secret=",
+];
+
+/// Drops or masks sensitive substrings. We refuse to log anything that
+/// looks like a credential — the message is replaced with a safe marker.
+pub fn sanitize_log_message(msg: &str) -> String {
+    for marker in SENSITIVE_MARKERS {
+        if msg.contains(marker) {
+            return "[REDACTED: sensitive content blocked]".into();
+        }
+    }
+    // Also cap length to prevent log poisoning.
+    if msg.len() > 2000 { msg.chars().take(2000).collect() } else { msg.to_string() }
+}
+
+/// Fire-and-forget write to structured_logs. Silently swallows errors
+/// because logging failures must never break the business flow.
+pub async fn slog(db: &SqlitePool, level: &str, message: &str, trace_id: &str) {
+    let safe = sanitize_log_message(message);
+    let _ = sqlx::query(
+        "INSERT INTO structured_logs (level, message, trace_id) VALUES (?, ?, ?)"
+    )
+    .bind(level)
+    .bind(&safe)
+    .bind(trace_id)
+    .execute(db)
+    .await;
+}
 
 // ── Error sanitization ────────────────────────────────────────────────
 
@@ -130,6 +177,45 @@ impl CivilDateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_blocks_password_word() {
+        assert_eq!(
+            sanitize_log_message("user submitted password: hunter2"),
+            "[REDACTED: sensitive content blocked]"
+        );
+    }
+
+    #[test]
+    fn sanitize_blocks_argon_hash() {
+        assert_eq!(
+            sanitize_log_message("stored $argon2id$v=19$..."),
+            "[REDACTED: sensitive content blocked]"
+        );
+    }
+
+    #[test]
+    fn sanitize_blocks_bearer_token() {
+        assert_eq!(
+            sanitize_log_message("Authorization: Bearer abc.def"),
+            "[REDACTED: sensitive content blocked]"
+        );
+    }
+
+    #[test]
+    fn sanitize_passes_clean_messages() {
+        assert_eq!(
+            sanitize_log_message("intake.create id=abc123"),
+            "intake.create id=abc123"
+        );
+    }
+
+    #[test]
+    fn sanitize_caps_very_long_messages() {
+        let long = "a".repeat(5000);
+        let result = sanitize_log_message(&long);
+        assert_eq!(result.len(), 2000);
+    }
 
     #[test]
     fn unix_epoch_is_1970_01_01() {

@@ -4,7 +4,7 @@ use axum::{Extension, Json};
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::common::{db_err, require_write_role};
+use crate::common::{db_err, require_write_role, slog};
 use crate::error::AppError;
 use crate::extractors::SessionUser;
 use crate::middleware::trace_id::TraceId;
@@ -22,14 +22,11 @@ pub async fn list(
 ) -> Result<Json<Vec<IntakeResponse>>, AppError> {
     let t = &tid.0;
     let rows = sqlx::query_as::<_, IntakeRow>(
-        "SELECT id, facility_id, intake_type, status, details, created_by, created_at FROM intake_records ORDER BY created_at DESC",
+        "SELECT id, facility_id, intake_type, status, details, created_by, created_at, region, tags FROM intake_records ORDER BY created_at DESC",
     )
     .fetch_all(&state.db).await
     .map_err(db_err(t))?;
-    Ok(Json(rows.into_iter().map(|r| IntakeResponse {
-        id: r.id, facility_id: r.facility_id, intake_type: r.intake_type,
-        status: r.status, details: r.details, created_by: r.created_by, created_at: r.created_at,
-    }).collect()))
+    Ok(Json(rows.into_iter().map(row_to_resp).collect()))
 }
 
 pub async fn create(
@@ -44,17 +41,36 @@ pub async fn create(
         return Err(AppError::validation("intake_type must be animal, supply, or donation", t));
     }
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO intake_records (id, intake_type, details, created_by) VALUES (?,?,?,?)")
-        .bind(&id).bind(&body.intake_type).bind(&body.details).bind(&user.user_id)
-        .execute(&state.db).await.map_err(db_err(t))?;
+    sqlx::query(
+        "INSERT INTO intake_records (id, intake_type, details, created_by, region, tags) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&body.intake_type)
+    .bind(&body.details)
+    .bind(&user.user_id)
+    .bind(&body.region)
+    .bind(&body.tags)
+    .execute(&state.db)
+    .await
+    .map_err(db_err(t))?;
 
     crate::modules::audit::write(
         &state.db, &user.user_id, "intake.create", "intake", &id, t,
     ).await;
+    slog(&state.db, "info",
+        &format!("intake.create type={} id={}", body.intake_type, id), t).await;
 
     Ok((StatusCode::CREATED, Json(IntakeResponse {
-        id, facility_id: "default".into(), intake_type: body.intake_type,
-        status: "received".into(), details: body.details, created_by: user.user_id, created_at: String::new(),
+        id,
+        facility_id: "default".into(),
+        intake_type: body.intake_type,
+        status: "received".into(),
+        details: body.details,
+        created_by: user.user_id,
+        created_at: String::new(),
+        region: body.region,
+        tags: body.tags,
     })))
 }
 
@@ -65,15 +81,26 @@ pub async fn get_one(
 ) -> Result<Json<IntakeResponse>, AppError> {
     let t = &tid.0;
     let r = sqlx::query_as::<_, IntakeRow>(
-        "SELECT id, facility_id, intake_type, status, details, created_by, created_at FROM intake_records WHERE id = ?",
+        "SELECT id, facility_id, intake_type, status, details, created_by, created_at, region, tags FROM intake_records WHERE id = ?",
     ).bind(&id).fetch_optional(&state.db).await
     .map_err(db_err(t))?
     .ok_or_else(|| AppError::not_found("Intake record not found", t))?;
 
-    Ok(Json(IntakeResponse {
-        id: r.id, facility_id: r.facility_id, intake_type: r.intake_type,
-        status: r.status, details: r.details, created_by: r.created_by, created_at: r.created_at,
-    }))
+    Ok(Json(row_to_resp(r)))
+}
+
+fn row_to_resp(r: IntakeRow) -> IntakeResponse {
+    IntakeResponse {
+        id: r.id,
+        facility_id: r.facility_id,
+        intake_type: r.intake_type,
+        status: r.status,
+        details: r.details,
+        created_by: r.created_by,
+        created_at: r.created_at,
+        region: r.region,
+        tags: r.tags,
+    }
 }
 
 pub async fn update_status(
@@ -105,6 +132,8 @@ pub async fn update_status(
     crate::modules::audit::write(
         &state.db, &user.user_id, "intake.status_update", "intake", &id, t,
     ).await;
+    slog(&state.db, "info",
+        &format!("intake.status_update id={} status={}", id, body.status), t).await;
 
     Ok(Json(serde_json::json!({"message": "Status updated", "status": body.status})))
 }
@@ -113,4 +142,5 @@ pub async fn update_status(
 struct IntakeRow {
     id: String, facility_id: String, intake_type: String,
     status: String, details: String, created_by: String, created_at: String,
+    region: String, tags: String,
 }

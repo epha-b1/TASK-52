@@ -5,12 +5,15 @@
 
 use leptos::*;
 use crate::api::client;
-use fieldtrace_shared::{IntakeResponse, InspectionResponse};
+use fieldtrace_shared::{InspectionResponse, IntakeResponse, TransferResponse};
 
 #[component]
 pub fn WorkspacePage() -> impl IntoView {
     let (intake, set_intake) = create_signal(Vec::<IntakeResponse>::new());
     let (inspections, set_inspections) = create_signal(Vec::<InspectionResponse>::new());
+    // Transfer queue is now sourced from the real /transfers endpoint, not
+    // from filtering intake status.
+    let (transfers, set_transfers) = create_signal(Vec::<TransferResponse>::new());
     let (feedback, set_feedback) = create_signal(String::new());
     let (biometric_on, set_biometric_on) = create_signal(false);
 
@@ -24,6 +27,11 @@ pub fn WorkspacePage() -> impl IntoView {
     spawn_local(async move {
         if let Ok(list) = client::list_inspections().await {
             set_inspections.set(list);
+        }
+    });
+    spawn_local(async move {
+        if let Ok(list) = client::list_transfers().await {
+            set_transfers.set(list);
         }
     });
 
@@ -63,20 +71,32 @@ pub fn WorkspacePage() -> impl IntoView {
             </section>
 
             // ── Transfer Queue ──────────────────────────────────────
+            // Sourced from the /transfers first-class endpoint (NOT from
+            // filtering intake status) so lifecycle states come from the
+            // transfers table directly.
             <section class="ws-section">
                 <h3>"Transfer Queue"</h3>
                 {move || {
-                    let queue: Vec<_> = intake.get().into_iter()
-                        .filter(|i| i.status == "transferred" || i.status == "in_stock")
-                        .collect();
+                    let queue = transfers.get();
                     if queue.is_empty() {
                         view! { <p class="muted">"Transfer queue is empty."</p> }.into_view()
                     } else {
-                        queue.into_iter().map(|i| view! {
-                            <div class="ws-row">
-                                <strong>{i.intake_type.clone()}</strong>
-                                <span class="tag tag-info">{i.status.clone()}</span>
-                            </div>
+                        queue.into_iter().map(|t| {
+                            let status_tag = match t.status.as_str() {
+                                "queued" => "tag-info",
+                                "approved" => "tag-info",
+                                "in_transit" => "tag-info",
+                                "received" => "tag-ok",
+                                "canceled" => "tag-default",
+                                _ => "tag-default",
+                            };
+                            view! {
+                                <div class="ws-row">
+                                    <strong>{t.destination.clone()}</strong>
+                                    <span class={format!("tag {}", status_tag)}>{t.status.clone()}</span>
+                                    <span class="muted">" "{t.reason.clone()}</span>
+                                </div>
+                            }
                         }).collect_view()
                     }
                 }}

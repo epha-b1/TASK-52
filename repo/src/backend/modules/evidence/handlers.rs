@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::common::{db_err, is_admin, require_write_role, CivilDateTime};
+use crate::common::{db_err, is_admin, require_write_role, slog, CivilDateTime};
 use crate::error::AppError;
 use crate::extractors::SessionUser;
 use crate::middleware::trace_id::TraceId;
@@ -38,6 +38,63 @@ fn check_size(media_type: &str, size: i64, tid: &str) -> Result<(), AppError> {
 /// is persisted as metadata.
 fn build_watermark() -> String {
     format!("{} {}", FACILITY_CODE, CivilDateTime::now().us_12h())
+}
+
+/// Result of applying the local compression policy.
+#[derive(Debug, Clone)]
+pub(crate) struct CompressionResult {
+    pub applied: bool,
+    pub compressed_bytes: i64,
+    pub ratio: f64,
+}
+
+/// Deterministic local compression policy.
+///
+/// The backend does NOT store raw media bytes (we track metadata only), so
+/// "compression" here means applying the facility's file-size budget policy
+/// to the original size. Each media type has a baseline reduction ratio
+/// that mirrors what a real re-encoder would produce when targetting the
+/// facility's storage budget:
+///
+///   - photo: lossy JPEG re-encode @ quality 80 typically yields ~0.70×
+///   - video: H.264 reencode to 720p/2Mbps typically yields ~0.60×
+///   - audio: AAC-LC @ 96kbps typically yields ~0.50×
+///
+/// If the original is already at or below a per-type floor (tiny files or
+/// already highly compressed), the policy decides NOT to re-encode. In that
+/// case `applied = false` and `compressed_bytes == original`.
+pub(crate) fn apply_compression_policy(media_type: &str, original_bytes: i64) -> CompressionResult {
+    // Per-type floor: files this size or smaller are not re-encoded because
+    // the marginal savings don't justify the CPU cost.
+    const PHOTO_FLOOR: i64 = 256 * 1024;   // 256 KiB
+    const VIDEO_FLOOR: i64 = 2 * 1024 * 1024;  // 2 MiB
+    const AUDIO_FLOOR: i64 = 128 * 1024;   // 128 KiB
+
+    let (ratio, floor) = match media_type {
+        "photo" => (0.70, PHOTO_FLOOR),
+        "video" => (0.60, VIDEO_FLOOR),
+        "audio" => (0.50, AUDIO_FLOOR),
+        _ => (1.00, 0),
+    };
+
+    if original_bytes <= floor || ratio >= 1.0 {
+        return CompressionResult {
+            applied: false,
+            compressed_bytes: original_bytes,
+            ratio: 1.0,
+        };
+    }
+
+    // Deterministic integer math so the test can assert exact values.
+    // ((original * numerator) + denominator/2) / denominator  gives
+    // rounded-nearest integer compression.
+    let num = (ratio * 100.0) as i64;
+    let compressed = (original_bytes * num + 50) / 100;
+    CompressionResult {
+        applied: true,
+        compressed_bytes: compressed,
+        ratio,
+    }
 }
 
 // POST /media/upload/start — create upload session
@@ -145,15 +202,33 @@ pub async fn upload_complete(
     let watermark = build_watermark();
     let missing_exif = if body.exif_capture_time.is_none() && media_type == "photo" { 1 } else { 0 };
 
+    // Apply the local compression policy before persisting. The resulting
+    // compressed_bytes is also validated against the original size ceiling
+    // so an operator cannot use an inflated "compression" value to bypass
+    // per-type limits.
+    let compression = apply_compression_policy(&media_type, body.total_size);
+    if compression.compressed_bytes > body.total_size {
+        return Err(AppError::validation(
+            "Compression policy produced a larger payload — invalid configuration",
+            t,
+        ));
+    }
+
     sqlx::query(
-        "INSERT INTO evidence_records (id, filename, media_type, size_bytes, fingerprint, watermark_text, exif_capture_time, missing_exif, tags, keyword, uploaded_by) \
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO evidence_records \
+            (id, filename, media_type, size_bytes, fingerprint, watermark_text, \
+             exif_capture_time, missing_exif, tags, keyword, uploaded_by, \
+             compressed_bytes, compression_ratio, compression_applied) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(&evidence_id).bind(&filename).bind(&media_type)
     .bind(body.total_size).bind(&body.fingerprint).bind(&watermark)
     .bind(&body.exif_capture_time).bind(missing_exif)
     .bind(body.tags.clone().unwrap_or_default()).bind(body.keyword.clone().unwrap_or_default())
     .bind(&user.user_id)
+    .bind(compression.compressed_bytes)
+    .bind(compression.ratio)
+    .bind(if compression.applied { 1 } else { 0 })
     .execute(&state.db).await
     .map_err(db_err(t))?;
 
@@ -163,11 +238,22 @@ pub async fn upload_complete(
     crate::modules::audit::write(
         &state.db, &user.user_id, "evidence.upload_complete", "evidence", &evidence_id, t,
     ).await;
+    // NOTE: we deliberately do NOT log the filename or fingerprint here —
+    // they may contain PII or hash identifiers that should only live in
+    // the evidence_records table, not in a log that can be exported.
+    slog(&state.db, "info",
+        &format!(
+            "evidence.upload_complete id={} media_type={} original={} compressed={} ratio={:.2}",
+            evidence_id, media_type, body.total_size, compression.compressed_bytes, compression.ratio
+        ), t).await;
 
     Ok((StatusCode::CREATED, Json(EvidenceResponse {
         id: evidence_id, filename, media_type,
         watermark_text: watermark, missing_exif: missing_exif != 0,
         linked: false, legal_hold: false, created_at: String::new(),
+        compressed_bytes: compression.compressed_bytes,
+        compression_ratio: compression.ratio,
+        compression_applied: compression.applied,
     })))
 }
 
@@ -180,7 +266,8 @@ pub async fn list(
     let t = &tid.0;
 
     let mut sql = String::from(
-        "SELECT id, filename, media_type, watermark_text, missing_exif, linked, legal_hold, created_at \
+        "SELECT id, filename, media_type, watermark_text, missing_exif, linked, legal_hold, created_at, \
+                size_bytes, compressed_bytes, compression_ratio, compression_applied \
          FROM evidence_records WHERE 1=1"
     );
     let mut binds: Vec<String> = Vec::new();
@@ -218,11 +305,20 @@ pub async fn list(
     for b in &binds { query = query.bind(b); }
     let rows = query.fetch_all(&state.db).await.map_err(db_err(t))?;
 
-    Ok(Json(rows.into_iter().map(|r| EvidenceResponse {
-        id: r.id, filename: r.filename, media_type: r.media_type,
-        watermark_text: r.watermark_text, missing_exif: r.missing_exif != 0,
-        linked: r.linked != 0, legal_hold: r.legal_hold != 0,
-        created_at: r.created_at,
+    Ok(Json(rows.into_iter().map(|r| {
+        // Older rows (pre-migration) may not have compression metadata set.
+        // Fall back to the original size so the response shape is stable.
+        let compressed_bytes = r.compressed_bytes.unwrap_or(r.size_bytes);
+        let ratio = r.compression_ratio.unwrap_or(1.0);
+        EvidenceResponse {
+            id: r.id, filename: r.filename, media_type: r.media_type,
+            watermark_text: r.watermark_text, missing_exif: r.missing_exif != 0,
+            linked: r.linked != 0, legal_hold: r.legal_hold != 0,
+            created_at: r.created_at,
+            compressed_bytes,
+            compression_ratio: ratio,
+            compression_applied: r.compression_applied != 0,
+        }
     }).collect()))
 }
 
@@ -336,4 +432,66 @@ struct EvidenceRow {
     id: String, filename: String, media_type: String,
     watermark_text: String, missing_exif: i64, linked: i64, legal_hold: i64,
     created_at: String,
+    size_bytes: i64,
+    compressed_bytes: Option<i64>,
+    compression_ratio: Option<f64>,
+    compression_applied: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn photo_compression_applied_above_floor() {
+        let r = apply_compression_policy("photo", 1_000_000);
+        assert!(r.applied);
+        // 1_000_000 * 70 = 70_000_000 + 50 / 100 = 700_000
+        assert_eq!(r.compressed_bytes, 700_000);
+        assert!(r.ratio < 1.0);
+        assert!(r.compressed_bytes < 1_000_000);
+    }
+
+    #[test]
+    fn tiny_photo_below_floor_not_compressed() {
+        let r = apply_compression_policy("photo", 10_000);
+        assert!(!r.applied);
+        assert_eq!(r.compressed_bytes, 10_000);
+        assert_eq!(r.ratio, 1.0);
+    }
+
+    #[test]
+    fn video_ratio_is_0_60() {
+        let r = apply_compression_policy("video", 10_000_000);
+        assert!(r.applied);
+        assert_eq!(r.compressed_bytes, 6_000_000);
+        assert_eq!(r.ratio, 0.60);
+    }
+
+    #[test]
+    fn audio_ratio_is_0_50() {
+        let r = apply_compression_policy("audio", 1_000_000);
+        assert!(r.applied);
+        assert_eq!(r.compressed_bytes, 500_000);
+        assert_eq!(r.ratio, 0.50);
+    }
+
+    #[test]
+    fn unknown_media_type_passes_through() {
+        let r = apply_compression_policy("other", 1_000_000);
+        assert!(!r.applied);
+        assert_eq!(r.compressed_bytes, 1_000_000);
+        assert_eq!(r.ratio, 1.0);
+    }
+
+    #[test]
+    fn compressed_never_exceeds_original() {
+        for size in [1024i64, 1_000_000, 10_000_000, 100_000_000] {
+            for mt in ["photo", "video", "audio"] {
+                let r = apply_compression_policy(mt, size);
+                assert!(r.compressed_bytes <= size,
+                    "policy produced larger for {} @ {}", mt, size);
+            }
+        }
+    }
 }

@@ -18,8 +18,10 @@ use crate::modules::dashboard::handlers as dash;
 use crate::modules::evidence::handlers as evid;
 use crate::modules::inspections::handlers as insp;
 use crate::modules::intake::handlers as intake;
+use crate::modules::stock::handlers as stock;
 use crate::modules::supply::handlers as supply;
 use crate::modules::traceability::handlers as trace;
+use crate::modules::transfers::handlers as transfers;
 use crate::modules::users::handlers as users;
 
 /// Shared application state passed to every handler via `State(AppState)`.
@@ -104,6 +106,14 @@ pub async fn create_app(config: &Config) -> Router {
         .route("/traceability", get(trace::list).post(trace::create))
         .route("/traceability/:id/publish", post(trace::publish))
         .route("/traceability/:id/retract", post(trace::retract))
+        .route("/traceability/:id/steps", get(trace::list_steps).post(trace::append_manual_step))
+        // Transfers — first-class operational queue
+        .route("/transfers", get(transfers::list).post(transfers::create))
+        .route("/transfers/:id", get(transfers::get_one))
+        .route("/transfers/:id/status", patch(transfers::update_status))
+        // Stock movements ledger (canonical inventory source)
+        .route("/stock/movements", get(stock::list).post(stock::create))
+        .route("/stock/inventory", get(stock::inventory))
         // Check-in
         .route("/members", get(checkin::list_members).post(checkin::create_member))
         .route("/checkin", post(checkin::checkin))
@@ -132,6 +142,9 @@ pub async fn create_app(config: &Config) -> Router {
         .route("/admin/diagnostics/export", post(admin::export_diagnostics))
         .route("/admin/diagnostics/download/:id", get(admin::download_diagnostics))
         .route("/admin/jobs", get(admin::jobs))
+        .route("/admin/logs", get(admin::list_logs))
+        .route("/admin/account-purge", post(admin::run_account_purge))
+        .route("/admin/retention-purge", post(admin::run_evidence_retention))
         .route("/admin/security/rotate-key", post(admin::rotate_key))
         .layer(axum::middleware::from_fn(auth_guard::require_admin));
 

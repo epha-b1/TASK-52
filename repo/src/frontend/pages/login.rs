@@ -5,11 +5,16 @@ use crate::app::Page;
 use fieldtrace_shared::UserResponse;
 
 #[component]
-pub fn LoginPage(
+pub fn LoginPage<F: Fn() + Clone + 'static>(
     set_page: WriteSignal<Page>,
     set_user: WriteSignal<Option<UserResponse>>,
     session_msg: ReadSignal<Option<String>>,
     set_session_msg: WriteSignal<Option<String>>,
+    /// Called exactly once after a successful login, BEFORE the page
+    /// transition to Dashboard. Used by the app shell to consume any
+    /// preserved pending route and update the URL bar so the user lands
+    /// back where they were when their session expired.
+    on_login_success: F,
 ) -> impl IntoView {
     let (username, set_username) = create_signal(String::new());
     let (password, set_password) = create_signal(String::new());
@@ -24,10 +29,15 @@ pub fn LoginPage(
 
         let u = username.get();
         let p = password.get();
+        let on_login_success = on_login_success.clone();
         spawn_local(async move {
             match client::login(&u, &p).await {
                 Ok(auth) => {
                     set_user.set(Some(auth.user));
+                    // Fire the app-shell callback so it can pick up any
+                    // route preserved by a prior 401 redirect and
+                    // restore the URL bar.
+                    on_login_success();
                     set_page.set(Page::Dashboard);
                 }
                 Err(e) => {

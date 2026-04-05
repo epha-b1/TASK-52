@@ -4,7 +4,7 @@ use axum::{Extension, Json};
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::common::db_err;
+use crate::common::{db_err, require_write_role};
 use crate::crypto;
 use crate::error::AppError;
 use crate::extractors::SessionUser;
@@ -48,6 +48,8 @@ pub async fn create(
     Json(body): Json<AddressRequest>,
 ) -> Result<(StatusCode, Json<AddressResponse>), AppError> {
     let t = &tid.0;
+    // Auditor is read-only across the product, including the address book.
+    require_write_role(&user, t)?;
     validate_zip(&body.zip_plus4, t)?;
 
     let c = state.crypto();
@@ -83,6 +85,7 @@ pub async fn update(
     Json(body): Json<AddressRequest>,
 ) -> Result<Json<AddressResponse>, AppError> {
     let t = &tid.0;
+    require_write_role(&user, t)?;
     validate_zip(&body.zip_plus4, t)?;
 
     let c = state.crypto();
@@ -118,6 +121,7 @@ pub async fn delete(
     Path(addr_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let t = &tid.0;
+    require_write_role(&user, t)?;
     let res = sqlx::query("DELETE FROM address_book WHERE id=? AND user_id=?")
         .bind(&addr_id).bind(&user.user_id)
         .execute(&state.db).await

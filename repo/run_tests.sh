@@ -192,6 +192,10 @@ echo "[Step 11] Acceptance boundary + exhaustive matrix..."
 reset_db
 run_suite "AcceptanceBoundary" "API_tests/acceptance_boundary_test.sh"
 
+echo "[Step 12] Remediation regression (ISS-01 through ISS-08)..."
+reset_db
+run_suite "RemediationRegression" "API_tests/remediation_regression_test.sh"
+
 # Summary
 echo "========================================"
 if [ $TOTAL_FAIL -eq 0 ]; then

@@ -228,3 +228,205 @@ pub async fn change_password(current: &str, new_pw: &str) -> Result<(), ApiError
     if !resp.ok() { return Err(parse_error(resp).await); }
     Ok(())
 }
+
+// ── Evidence Upload ─────────────────────────────────────────────────
+
+pub async fn upload_start(req: &UploadStartRequest) -> Result<UploadStartResponse, ApiError> {
+    let resp = Request::post("/media/upload/start")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn upload_chunk(req: &UploadChunkRequest) -> Result<serde_json::Value, ApiError> {
+    let resp = Request::post("/media/upload/chunk")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn upload_complete(req: &UploadCompleteRequest) -> Result<EvidenceResponse, ApiError> {
+    let resp = Request::post("/media/upload/complete")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Supply Entries ──────────────────────────────────────────────────
+
+pub async fn list_supply() -> Result<Vec<SupplyResponse>, ApiError> {
+    let resp = Request::get("/supply-entries").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn create_supply(req: &SupplyRequest) -> Result<SupplyResponse, ApiError> {
+    let resp = Request::post("/supply-entries")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn resolve_supply(id: &str, req: &SupplyResolveRequest) -> Result<serde_json::Value, ApiError> {
+    let resp = Request::patch(&format!("/supply-entries/{}/resolve", id))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Traceability ────────────────────────────────────────────────────
+
+pub async fn list_traceability() -> Result<Vec<TraceCodeResponse>, ApiError> {
+    let resp = Request::get("/traceability").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn create_traceability(req: &TraceCodeRequest) -> Result<TraceCodeResponse, ApiError> {
+    let resp = Request::post("/traceability")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn publish_traceability(id: &str, comment: &str) -> Result<serde_json::Value, ApiError> {
+    let body = serde_json::json!({"comment": comment});
+    let resp = Request::post(&format!("/traceability/{}/publish", id))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn retract_traceability(id: &str, comment: &str) -> Result<serde_json::Value, ApiError> {
+    let body = serde_json::json!({"comment": comment});
+    let resp = Request::post(&format!("/traceability/{}/retract", id))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn list_trace_steps(id: &str) -> Result<Vec<TraceStepResponse>, ApiError> {
+    let resp = Request::get(&format!("/traceability/{}/steps", id)).send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Check-In ────────────────────────────────────────────────────────
+
+pub async fn list_members() -> Result<Vec<MemberResponse>, ApiError> {
+    let resp = Request::get("/members").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn create_member(req: &MemberRequest) -> Result<MemberResponse, ApiError> {
+    let resp = Request::post("/members")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn checkin(req: &CheckinRequest) -> Result<CheckinResponse, ApiError> {
+    let resp = Request::post("/checkin")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(req).unwrap())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn checkin_history() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::get("/checkin/history").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Dashboard with filters ──────────────────────────────────────────
+
+pub async fn reports_summary_filtered(
+    from: &str, to: &str, status: &str, intake_type: &str,
+    region: &str, tags: &str, q: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let mut params: Vec<String> = Vec::new();
+    if !from.is_empty() { params.push(format!("from={}", urlencode(from))); }
+    if !to.is_empty() { params.push(format!("to={}", urlencode(to))); }
+    if !status.is_empty() { params.push(format!("status={}", urlencode(status))); }
+    if !intake_type.is_empty() { params.push(format!("intake_type={}", urlencode(intake_type))); }
+    if !region.is_empty() { params.push(format!("region={}", urlencode(region))); }
+    if !tags.is_empty() { params.push(format!("tags={}", urlencode(tags))); }
+    if !q.is_empty() { params.push(format!("q={}", urlencode(q))); }
+    let path = if params.is_empty() { "/reports/summary".to_string() }
+               else { format!("/reports/summary?{}", params.join("&")) };
+    let resp = Request::get(&path).send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub fn build_export_url(
+    from: &str, to: &str, status: &str, intake_type: &str,
+    region: &str, tags: &str, q: &str,
+) -> String {
+    let mut params: Vec<String> = Vec::new();
+    if !from.is_empty() { params.push(format!("from={}", urlencode(from))); }
+    if !to.is_empty() { params.push(format!("to={}", urlencode(to))); }
+    if !status.is_empty() { params.push(format!("status={}", urlencode(status))); }
+    if !intake_type.is_empty() { params.push(format!("intake_type={}", urlencode(intake_type))); }
+    if !region.is_empty() { params.push(format!("region={}", urlencode(region))); }
+    if !tags.is_empty() { params.push(format!("tags={}", urlencode(tags))); }
+    if !q.is_empty() { params.push(format!("q={}", urlencode(q))); }
+    if params.is_empty() { "/reports/export".to_string() }
+    else { format!("/reports/export?{}", params.join("&")) }
+}
+
+// ── Adoption conversion ─────────────────────────────────────────────
+
+pub async fn adoption_conversion() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::get("/reports/adoption-conversion").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}

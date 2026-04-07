@@ -257,8 +257,16 @@ pub struct AddressRequest {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressResponse {
-    pub id: String, pub label: String, pub street: String, pub city: String,
-    pub state: String, pub zip_plus4: String, pub phone_masked: String, pub created_at: String,
+    pub id: String, pub label: String,
+    /// Masked street (house number + "***") to reduce incidental exposure.
+    pub street_masked: String,
+    /// Masked city (first 2 chars + "***").
+    pub city_masked: String,
+    /// State abbreviation (not masked — 2 chars not sensitive alone).
+    pub state: String,
+    pub zip_plus4: String,
+    pub phone_masked: String,
+    pub created_at: String,
 }
 
 // ── Intake ──
@@ -370,7 +378,14 @@ pub struct UploadStartRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadStartResponse { pub upload_id: String, pub chunk_size_bytes: i64, pub total_chunks: i64 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadChunkRequest { pub upload_id: String, pub chunk_index: i64 }
+pub struct UploadChunkRequest {
+    pub upload_id: String,
+    pub chunk_index: i64,
+    /// Base64-encoded chunk payload. The backend decodes and persists the
+    /// raw bytes to `storage/uploads/<upload_id>/chunk_<index>`.
+    #[serde(default)]
+    pub data: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadCompleteRequest {
     pub upload_id: String, pub fingerprint: String, pub total_size: i64,

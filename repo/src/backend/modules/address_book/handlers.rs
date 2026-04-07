@@ -71,7 +71,9 @@ pub async fn create(
     ).await;
 
     Ok((StatusCode::CREATED, Json(AddressResponse {
-        id, label: body.label, street: body.street, city: body.city,
+        id, label: body.label,
+        street_masked: crypto::mask_street(&body.street),
+        city_masked: crypto::mask_city(&body.city),
         state: body.state, zip_plus4: body.zip_plus4,
         phone_masked: crypto::mask_phone(&body.phone), created_at: String::new(),
     })))
@@ -108,7 +110,9 @@ pub async fn update(
     ).await;
 
     Ok(Json(AddressResponse {
-        id: addr_id, label: body.label, street: body.street, city: body.city,
+        id: addr_id, label: body.label,
+        street_masked: crypto::mask_street(&body.street),
+        city_masked: crypto::mask_city(&body.city),
         state: body.state, zip_plus4: body.zip_plus4,
         phone_masked: crypto::mask_phone(&body.phone), created_at: String::new(),
     }))
@@ -140,11 +144,14 @@ pub async fn delete(
 
 fn to_response(c: &crypto::Crypto, r: AddrRow) -> AddressResponse {
     let phone = c.try_decrypt(&r.phone_enc).unwrap_or_default();
+    let street = c.try_decrypt(&r.street_enc).unwrap_or_default();
+    let city = c.try_decrypt(&r.city_enc).unwrap_or_default();
+    let state = c.try_decrypt(&r.state_enc).unwrap_or_default();
     AddressResponse {
         id: r.id, label: r.label,
-        street: c.try_decrypt(&r.street_enc).unwrap_or_default(),
-        city: c.try_decrypt(&r.city_enc).unwrap_or_default(),
-        state: c.try_decrypt(&r.state_enc).unwrap_or_default(),
+        street_masked: crypto::mask_street(&street),
+        city_masked: crypto::mask_city(&city),
+        state,
         zip_plus4: r.zip_plus4,
         phone_masked: crypto::mask_phone(&phone),
         created_at: r.created_at,

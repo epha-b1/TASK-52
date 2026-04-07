@@ -112,8 +112,9 @@ All environment variables are defined inline in `docker-compose.yml`. No `.env` 
 | STATIC_DIR | /app/static | Frontend static files directory |
 | STORAGE_DIR | /app/storage | Writable directory for diagnostic ZIPs, uploads |
 | RUST_LOG | info | Log level filter |
-| ENCRYPTION_KEY | (set in compose) | AES-256 encryption key (64 hex chars) |
+| ENCRYPTION_KEY | (auto-generated) | AES-256 encryption key (64 hex chars). If missing or placeholder, a random key is auto-generated for local dev |
 | ENCRYPTION_KEY_FILE | (unset) | Optional path to a file holding the hex key. If set, takes precedence over `ENCRYPTION_KEY` and is written to on `/admin/security/rotate-key` |
+| FACILITY_CODE | FAC01 | Facility code used in watermarks and traceability codes. Defaults to the DB seed value |
 
 ## Role matrix (enforced server-side)
 
@@ -358,7 +359,7 @@ Admin can inspect the log stream via `GET /admin/logs` (last 200 rows).
 |---|---|
 | 1 | Foundation — health, trace IDs, SQLite WAL, Docker, static frontend |
 | 2 | Auth + Users — Argon2id, lockout, sessions, RBAC |
-| 3 | Address Book — AES-256-GCM encryption, ZIP+4 validation, phone masking, object-level auth |
+| 3 | Address Book — AES-256-GCM encryption, ZIP+4 validation, address/phone masking in API responses, object-level auth |
 | 4 | Intake + Inspections — state machine, 409 on invalid transitions |
 | 5 | Evidence + Chunked Upload — size limits, EXIF flagging, link immutability, legal hold |
 | 6 | Supply Parsing — deterministic color/size normalization, `needs_review` state |

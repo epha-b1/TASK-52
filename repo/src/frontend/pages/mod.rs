@@ -1,8 +1,13 @@
 pub mod address_book;
+pub mod checkin;
 pub mod dashboard;
 pub mod evidence_search;
+pub mod evidence_upload;
 pub mod intake;
 pub mod login;
+pub mod profile;
 pub mod register;
 pub mod reports;
+pub mod supply;
+pub mod traceability;
 pub mod workspace;

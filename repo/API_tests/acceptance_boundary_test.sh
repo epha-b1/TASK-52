@@ -48,6 +48,9 @@ sql() {
     sqlite3 "$DB" "$1"
 }
 
+# Minimal JPEG header for chunk uploads
+JPEG_B64=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 -w0 2>/dev/null || printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 2>/dev/null)
+
 echo "=== Acceptance Boundary + Matrix Suite ==="
 
 # ─── Setup: admin + staff + auditor ──────────────────────────────────
@@ -175,7 +178,7 @@ up=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type:
     -d '{"filename":"bnd.jpg","media_type":"photo","total_size":1048576,"duration_seconds":0}')
 uid=$(echo "$up" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0}" > /dev/null
+    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 ev=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
     -d "{\"upload_id\":\"$uid\",\"fingerprint\":\"bndhash1234567890\",\"total_size\":1048576,\"exif_capture_time\":null,\"tags\":\"\",\"keyword\":\"\"}")
 EVID=$(echo "$ev" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -224,7 +227,7 @@ fi
 
 # Send only chunk 0 (leaving chunk 1 missing), then try to complete.
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0}" > /dev/null
+    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" \
     -H "Content-Type: application/json" \
     -d "{\"upload_id\":\"$uid\",\"fingerprint\":\"bndmissingfp01\",\"total_size\":4194304,\"exif_capture_time\":null,\"tags\":\"\",\"keyword\":\"\"}")
@@ -232,9 +235,9 @@ check "Complete with missing chunk → 409" "409" "$R"
 
 # Duplicate chunk index is idempotent (completes twice but received_count stays 1).
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0}" > /dev/null
+    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 dupe=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0}")
+    -d "{\"upload_id\":\"$uid\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}")
 if echo "$dupe" | grep -q '"received_count":1'; then
     echo "PASS: duplicate chunk_index keeps received_count = 1"
     PASS=$((PASS + 1))
@@ -246,7 +249,7 @@ fi
 # Out-of-range chunk index → 400.
 R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" \
     -H "Content-Type: application/json" \
-    -d "{\"upload_id\":\"$uid\",\"chunk_index\":99}")
+    -d "{\"upload_id\":\"$uid\",\"chunk_index\":99,\"data\":\"$JPEG_B64\"}")
 check "Out-of-range chunk index → 400" "400" "$R"
 
 # ═══════════════════════════════════════════════════════════════════════

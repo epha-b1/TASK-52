@@ -24,6 +24,9 @@ check() {
     fi
 }
 
+# Minimal JPEG header for chunk uploads
+JPEG_B64=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 -w0 2>/dev/null || printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 2>/dev/null)
+
 echo "=== Blockers Suite: 6 fix categories ==="
 
 # ─── Setup: admin + staff + auditor ───────────────────────────────────
@@ -94,7 +97,7 @@ UB=$(curl -s -b "$STAFF_CK" -X POST "$BASE/media/upload/start" -H "Content-Type:
   -d '{"filename":"staff.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
 UPID=$(echo "$UB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$STAFF_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$UPID\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$UPID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 EB=$(curl -s -b "$STAFF_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$UPID\",\"fingerprint\":\"aabbccdd11223344\",\"total_size\":1024,\"exif_capture_time\":null,\"tags\":\"x\",\"keyword\":\"y\"}")
 EV_ID=$(echo "$EB" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -333,7 +336,7 @@ upload_evidence_as_admin() {
     local uid
     uid=$(echo "$ub" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
     curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-      -d "{\"upload_id\":\"$uid\",\"chunk_index\":0}" > /dev/null
+      -d "{\"upload_id\":\"$uid\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
     local eb
     eb=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
       -d "{\"upload_id\":\"$uid\",\"fingerprint\":\"retent01abcdef02\",\"total_size\":1048576,\"exif_capture_time\":null,\"tags\":\"ret\",\"keyword\":\"$name\"}")
@@ -411,7 +414,7 @@ PHB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type
   -d '{"filename":"comp_photo.jpg","media_type":"photo","total_size":1048576,"duration_seconds":0}')
 PHUID=$(echo "$PHB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$PHUID\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$PHUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 PHRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$PHUID\",\"fingerprint\":\"compphoto1234567\",\"total_size\":1048576,\"exif_capture_time\":null,\"tags\":\"c\",\"keyword\":\"c\"}")
 
@@ -443,7 +446,7 @@ SMB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type
   -d '{"filename":"tiny.jpg","media_type":"photo","total_size":10000,"duration_seconds":0}')
 SMUID=$(echo "$SMB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$SMUID\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$SMUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 SMRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$SMUID\",\"fingerprint\":\"tinyphoto1234567\",\"total_size\":10000,\"exif_capture_time\":null,\"tags\":\"c\",\"keyword\":\"c\"}")
 if echo "$SMRESP" | grep -q '"compression_applied":false'; then
@@ -457,7 +460,7 @@ AB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type:
   -d '{"filename":"a.m4a","media_type":"audio","total_size":1048576,"duration_seconds":10}')
 AUID=$(echo "$AB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$AUID\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$AUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 ARESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$AUID\",\"fingerprint\":\"audioclip1234567\",\"total_size\":1048576,\"exif_capture_time\":null,\"tags\":\"c\",\"keyword\":\"c\"}")
 if echo "$ARESP" | grep -qE '"compression_ratio":0\.5'; then

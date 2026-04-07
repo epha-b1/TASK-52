@@ -90,6 +90,30 @@ pub fn mask_phone(phone: &str) -> String {
     }
 }
 
+/// Mask a street address: show first word (house number) + "***".
+pub fn mask_street(street: &str) -> String {
+    let trimmed = street.trim();
+    if trimmed.is_empty() { return "***".into(); }
+    match trimmed.find(' ') {
+        Some(idx) => format!("{} ***", &trimmed[..idx]),
+        None if trimmed.len() <= 3 => "***".into(),
+        None => format!("{}***", &trimmed[..3]),
+    }
+}
+
+/// Mask a city name: show first 2 characters + "***".
+pub fn mask_city(city: &str) -> String {
+    let trimmed = city.trim();
+    if trimmed.len() <= 2 { return "***".into(); }
+    format!("{}***", &trimmed[..2])
+}
+
+/// Mask a state: return as-is (typically 2-letter abbreviation, not
+/// considered sensitive on its own without the rest of the address).
+pub fn mask_state(state: &str) -> String {
+    state.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +158,25 @@ mod tests {
         assert_eq!(mask_phone("555-867-5309"), "***-***-5309");
         assert_eq!(mask_phone("(415) 555-1234"), "***-***-1234");
         assert_eq!(mask_phone("1"), "***-***-****");
+    }
+
+    #[test]
+    fn mask_street_shows_house_number() {
+        assert_eq!(mask_street("123 Main Street"), "123 ***");
+        assert_eq!(mask_street("4500 Oak Ave"), "4500 ***");
+        assert_eq!(mask_street(""), "***");
+    }
+
+    #[test]
+    fn mask_city_shows_first_two() {
+        assert_eq!(mask_city("Portland"), "Po***");
+        assert_eq!(mask_city("LA"), "***");
+        assert_eq!(mask_city("San Francisco"), "Sa***");
+    }
+
+    #[test]
+    fn mask_state_passthrough() {
+        assert_eq!(mask_state("OR"), "OR");
+        assert_eq!(mask_state("CA"), "CA");
     }
 }

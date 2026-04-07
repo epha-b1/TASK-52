@@ -109,6 +109,9 @@ pub async fn update_user(
 }
 
 // ── DELETE /users/:id ───────────────────────────────────────────────
+// Soft-anonymizes the user (sets anonymized=1, clears personal data,
+// invalidates sessions) rather than hard-deleting, so FK references
+// in audit_logs and checkin_ledger remain intact.
 
 pub async fn delete_user(
     State(state): State<AppState>,
@@ -116,22 +119,45 @@ pub async fn delete_user(
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let t = &tid.0;
-    let result = sqlx::query("DELETE FROM users WHERE id = ?")
-        .bind(&user_id)
-        .execute(&state.db)
-        .await
-        .map_err(db_err(t))?;
 
-    if result.rows_affected() == 0 {
+    // Verify user exists and is not already anonymized
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT username FROM users WHERE id = ? AND anonymized = 0"
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_err(t))?;
+
+    if row.is_none() {
         return Err(AppError::not_found("User not found", t));
     }
 
+    // Soft-anonymize: replace username, invalidate password, set flag
+    let anon_name = format!("anon-{}", user_id);
+    sqlx::query(
+        "UPDATE users SET username = ?, password_hash = '$invalid$', \
+         anonymized = 1, updated_at = datetime('now') WHERE id = ?"
+    )
+    .bind(&anon_name)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await
+    .map_err(db_err(t))?;
+
+    // Clear address book (personal data)
+    let _ = sqlx::query("DELETE FROM address_book WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&state.db)
+        .await;
+
+    // Invalidate sessions
     let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
         .bind(&user_id)
         .execute(&state.db)
         .await;
 
-    Ok(Json(serde_json::json!({"message": "User deleted"})))
+    Ok(Json(serde_json::json!({"message": "User anonymized"})))
 }
 
 fn validate_role(role: &str, tid: &str) -> Result<(), AppError> {

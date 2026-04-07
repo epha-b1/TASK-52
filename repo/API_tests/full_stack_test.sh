@@ -12,6 +12,9 @@ check() {
     fi
 }
 
+# Minimal JPEG header (FF D8 FF E0 ...) base64-encoded for chunk uploads
+JPEG_B64=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 -w0 2>/dev/null || printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 2>/dev/null)
+
 echo "=== Comprehensive API Tests (Slices 4-11) ==="
 
 # Setup: admin user + staff user
@@ -77,7 +80,7 @@ UPLOAD_ID=$(echo "$BODY" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 
 # Send chunk
 R=$(curl -s -o /dev/null -w "%{http_code}" -b "$CK" -X POST "$BASE/media/upload/chunk" \
-  -H "Content-Type: application/json" -d "{\"upload_id\":\"$UPLOAD_ID\",\"chunk_index\":0}")
+  -H "Content-Type: application/json" -d "{\"upload_id\":\"$UPLOAD_ID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}")
 check "Chunk upload 200" "200" "$R"
 
 # Complete

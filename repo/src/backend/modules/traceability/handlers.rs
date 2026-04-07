@@ -11,8 +11,6 @@ use crate::middleware::trace_id::TraceId;
 use crate::modules::traceability::code;
 use fieldtrace_shared::*;
 
-const FACILITY_CODE: &str = "FAC01";
-
 /// Append an immutable timeline step for a traceability code. Called
 /// on create / publish / retract / inspection-outcome / manual-note so
 /// the history is auditable without reading `traceability_events`
@@ -79,7 +77,7 @@ pub async fn create(
         .map_err(db_err(t))?;
 
     let date = CivilDateTime::now().yyyymmdd();
-    let generated = code::generate(FACILITY_CODE, &date, seq.0 as u32);
+    let generated = code::generate(&state.config.facility_code, &date, seq.0 as u32);
     let id = Uuid::new_v4().to_string();
 
     sqlx::query("INSERT INTO traceability_codes (id, code, intake_id, created_by) VALUES (?,?,?,?)")

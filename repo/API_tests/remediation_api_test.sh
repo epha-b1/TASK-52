@@ -21,6 +21,9 @@ json_has() {
     echo "$1" | grep -q "$2"
 }
 
+# Minimal JPEG header for chunk uploads
+JPEG_B64=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 -w0 2>/dev/null || printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | base64 2>/dev/null)
+
 echo "=== Remediation Suite: Security + Lifecycle + Idempotency ==="
 
 # ─── Setup: admin + staff + auditor ───────────────────────────────────
@@ -105,7 +108,7 @@ UBODY=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Ty
   -d '{"filename":"wm_test.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
 UPLOAD_ID=$(echo "$UBODY" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$UPLOAD_ID\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$UPLOAD_ID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 EBODY=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$UPLOAD_ID\",\"fingerprint\":\"abc12345def67890\",\"total_size\":1024,\"exif_capture_time\":null,\"tags\":\"dog\",\"keyword\":\"foo\"}")
 EVIDENCE_ID=$(echo "$EBODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -134,7 +137,7 @@ UBODY2=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-T
   -d '{"filename":"fp2.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
 UPLOAD_ID2=$(echo "$UBODY2" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$UPLOAD_ID2\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$UPLOAD_ID2\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$UPLOAD_ID2\",\"fingerprint\":\"\",\"total_size\":1024,\"exif_capture_time\":null,\"tags\":null,\"keyword\":null}")
 check "Empty fingerprint → 400" "400" "$R"
@@ -148,7 +151,7 @@ up1=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type
   -d '{"filename":"f1.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
 UID1=$(echo "$up1" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$UID1\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$UID1\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$UID1\",\"fingerprint\":\"deadbeef12345678\",\"total_size\":1024,\"exif_capture_time\":null,\"tags\":\"alpha\",\"keyword\":\"apple\"}" > /dev/null
 
@@ -156,7 +159,7 @@ up2=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type
   -d '{"filename":"f2.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
 UID2=$(echo "$up2" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$UID2\",\"chunk_index\":0}" > /dev/null
+  -d "{\"upload_id\":\"$UID2\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$UID2\",\"fingerprint\":\"cafebabe87654321\",\"total_size\":1024,\"exif_capture_time\":null,\"tags\":\"beta\",\"keyword\":\"banana\"}" > /dev/null
 

@@ -269,24 +269,51 @@ pub async fn export_csv(
 pub async fn adoption_conversion(
     State(state): State<AppState>,
     Extension(tid): Extension<TraceId>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let t = &tid.0;
-    let animals: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM intake_records WHERE intake_type = 'animal'")
-        .fetch_one(&state.db)
-        .await
-        .map_err(db_err(t))?;
-    let adopted: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM intake_records WHERE status = 'adopted' AND intake_type = 'animal'")
-        .fetch_one(&state.db)
-        .await
-        .map_err(db_err(t))?;
-    let rate = if animals.0 > 0 {
-        (adopted.0 as f64) / (animals.0 as f64)
+
+    // Accept optional from/to date filters for period-scoped reporting.
+    let mut where_parts = vec!["intake_type = 'animal'".to_string()];
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(from) = q.get("from") {
+        if !from.is_empty() {
+            where_parts.push("created_at >= ?".into());
+            binds.push(from.clone());
+        }
+    }
+    if let Some(to) = q.get("to") {
+        if !to.is_empty() {
+            where_parts.push("created_at <= ?".into());
+            binds.push(to.clone());
+        }
+    }
+    let where_sql = where_parts.join(" AND ");
+
+    let animals = count_with(
+        &state.db,
+        format!("SELECT COUNT(*) FROM intake_records WHERE {}", where_sql),
+        &binds,
+        t,
+    ).await?;
+
+    let mut adopted_binds = binds.clone();
+    adopted_binds.push("adopted".into());
+    let adopted = count_with(
+        &state.db,
+        format!("SELECT COUNT(*) FROM intake_records WHERE {} AND status = ?", where_sql),
+        &adopted_binds,
+        t,
+    ).await?;
+
+    let rate = if animals > 0 {
+        (adopted as f64) / (animals as f64)
     } else {
         0.0
     };
     Ok(Json(serde_json::json!({
-        "total": animals.0,
-        "adopted": adopted.0,
+        "total": animals,
+        "adopted": adopted,
         "conversion_rate": rate,
     })))
 }

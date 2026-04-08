@@ -645,6 +645,115 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+# 13. EVIDENCE LINKING — API contract verification
+# ═══════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 13. Evidence linking ━━━"
+
+# Create an intake target
+LINK_INTAKE=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/intake" -H "Content-Type: application/json" \
+  -d '{"intake_type":"animal","details":"link test"}')
+LINK_IID=$(echo "$LINK_INTAKE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Upload evidence for linking test
+LINKUB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
+  -d '{"filename":"link.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
+LINKUID=$(echo "$LINKUB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
+curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
+  -d "{\"upload_id\":\"$LINKUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
+LINK_FP=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | sha256sum | cut -d' ' -f1)
+LINKRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
+  -d "{\"upload_id\":\"$LINKUID\",\"fingerprint\":\"$LINK_FP\",\"total_size\":1024}")
+LINK_EID=$(echo "$LINKRESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Link to intake → 200
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/evidence/$LINK_EID/link" \
+  -H "Content-Type: application/json" -d "{\"target_type\":\"intake\",\"target_id\":\"$LINK_IID\"}")
+check "Link evidence to intake → 200" "200" "$R"
+
+# Link to nonexistent target → 404
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/evidence/$LINK_EID/link" \
+  -H "Content-Type: application/json" -d '{"target_type":"intake","target_id":"nonexistent"}')
+check "Link to nonexistent target → 404" "404" "$R"
+
+# Auditor cannot link
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$AUDITOR_CK" -X POST "$BASE/evidence/$LINK_EID/link" \
+  -H "Content-Type: application/json" -d "{\"target_type\":\"intake\",\"target_id\":\"$LINK_IID\"}")
+check "Auditor cannot link evidence → 403" "403" "$R"
+
+# Legal hold (admin only)
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X PATCH "$BASE/evidence/$LINK_EID/legal-hold" \
+  -H "Content-Type: application/json" -d '{"legal_hold":true}')
+check "Admin set legal hold → 200" "200" "$R"
+
+# Staff cannot set legal hold
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$STAFF_CK" -X PATCH "$BASE/evidence/$LINK_EID/legal-hold" \
+  -H "Content-Type: application/json" -d '{"legal_hold":false}')
+check "Staff cannot set legal hold → 403" "403" "$R"
+
+# ═══════════════════════════════════════════════════════════════════════
+# 14. CHECK-IN OVERRIDE — admin-only with non-empty reason
+# ═══════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 14. Check-in override (admin API contract) ━━━"
+
+# Create member
+curl -s -b "$ADMIN_CK" -X POST "$BASE/members" -H "Content-Type: application/json" \
+  -d '{"member_id":"OVR001","name":"Override Test 2"}' > /dev/null 2>&1
+
+# Normal checkin
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/checkin" \
+  -H "Content-Type: application/json" -d '{"member_id":"OVR001"}')
+check "Normal checkin → 201" "201" "$R"
+
+# Anti-passback blocks second checkin
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/checkin" \
+  -H "Content-Type: application/json" -d '{"member_id":"OVR001"}')
+check "Anti-passback blocks → 409" "409" "$R"
+
+# Admin override with valid reason succeeds
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/checkin" \
+  -H "Content-Type: application/json" -d '{"member_id":"OVR001","override_reason":"Emergency access needed"}')
+check "Admin override with reason → 201" "201" "$R"
+
+# Staff cannot override (even with reason)
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$STAFF_CK" -X POST "$BASE/checkin" \
+  -H "Content-Type: application/json" -d '{"member_id":"OVR001","override_reason":"Staff trying override"}')
+check "Staff cannot override → 403" "403" "$R"
+
+# ═══════════════════════════════════════════════════════════════════════
+# 15. ADMIN OPS — API contract for admin-only endpoints
+# ═══════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 15. Admin operations API ━━━"
+
+# Admin can access config
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" "$BASE/admin/config")
+check "Admin GET /admin/config → 200" "200" "$R"
+
+# Admin can access jobs
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" "$BASE/admin/jobs")
+check "Admin GET /admin/jobs → 200" "200" "$R"
+
+# Admin can access logs
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" "$BASE/admin/logs")
+check "Admin GET /admin/logs → 200" "200" "$R"
+
+# Admin can access config versions
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" "$BASE/admin/config/versions")
+check "Admin GET /admin/config/versions → 200" "200" "$R"
+
+# Staff cannot access admin endpoints
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$STAFF_CK" "$BASE/admin/config")
+check "Staff GET /admin/config → 403" "403" "$R"
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$STAFF_CK" "$BASE/admin/jobs")
+check "Staff GET /admin/jobs → 403" "403" "$R"
+
+# Auditor cannot access admin endpoints
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$AUDITOR_CK" "$BASE/admin/logs")
+check "Auditor GET /admin/logs → 403" "403" "$R"
+
+# ═══════════════════════════════════════════════════════════════════════
 # Summary
 # ═══════════════════════════════════════════════════════════════════════
 echo ""

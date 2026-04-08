@@ -35,6 +35,11 @@ COPY --from=builder /app/src/frontend/dist /app/static
 COPY --from=builder /app/migrations /app/migrations
 COPY unit_tests/ /app/unit_tests/
 COPY API_tests/ /app/API_tests/
+# Strip Windows \r line endings from shell scripts so they execute correctly
+# on Linux regardless of which OS cloned the repo (fixes "no such file or
+# directory" error on Windows-checked-out repos).
+RUN find /app -name '*.sh' -exec sed -i 's/\r$//' {} + \
+    && chmod +x /app/unit_tests/*.sh /app/API_tests/*.sh
 RUN mkdir -p /app/storage
 
 ENV PORT=8080

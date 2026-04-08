@@ -31,7 +31,7 @@ FieldTrace is an offline-first shelter and warehouse management system built wit
 | `admin` | Configuration, diagnostics, key rotation, jobs |
 | `profile` | User privacy preferences (persisted, user-scoped) |
 
-## Database Schema (13 migrations)
+## Database Schema (14 migrations)
 
 | Migration | Creates/Alters |
 |-----------|----------------|
@@ -191,7 +191,10 @@ Leptos CSR SPA with:
 - Draft autosave to localStorage
 - Session-expiry route preservation
 - Role-aware UI rendering
-- 14 page components including profile with privacy preferences editing
+- 15 page components including profile/privacy preferences and admin operations
+- Admin page (config view/rollback, diagnostics export, jobs, logs) visible only to administrators
+- Evidence search page with inline link, legal-hold, and delete actions
+- Check-in page with manual ID entry and admin-only override flow
 
 ## Middleware Stack
 

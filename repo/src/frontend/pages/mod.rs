@@ -1,4 +1,5 @@
 pub mod address_book;
+pub mod admin;
 pub mod checkin;
 pub mod dashboard;
 pub mod evidence_search;

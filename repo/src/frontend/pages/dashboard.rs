@@ -3,6 +3,7 @@ use leptos::*;
 use crate::api::client;
 use crate::app::Page;
 use crate::pages::address_book::AddressBookPage;
+use crate::pages::admin::AdminPage;
 use crate::pages::checkin::CheckinPage;
 use crate::pages::evidence_search::EvidenceSearchPage;
 use crate::pages::evidence_upload::EvidenceUploadPage;
@@ -27,18 +28,26 @@ pub fn DashboardPage(
         set_health.set(Some(result));
     });
 
-    // Session-expiry check: periodically verify session by calling /auth/me
+    // Session-expiry heartbeat: periodically verify session via /auth/me.
+    // On 401, immediately redirect to login (centralized expiry handling).
     {
         let set_page = set_page;
         let set_user = set_user;
         spawn_local(async move {
-            gloo_timers::future::sleep(std::time::Duration::from_secs(60)).await;
-            if client::get_me().await.is_err() {
-                set_user.set(None);
-                set_page.set(Page::Login);
+            loop {
+                gloo_timers::future::sleep(std::time::Duration::from_secs(60)).await;
+                if client::get_me().await.is_err() {
+                    set_user.set(None);
+                    set_page.set(Page::Login);
+                    break;
+                }
             }
         });
     }
+
+    let is_admin = move || {
+        user.get().map(|u| u.role == "administrator").unwrap_or(false)
+    };
 
     view! {
         <div class="app-body">
@@ -73,9 +82,12 @@ pub fn DashboardPage(
             <TraceabilityPage user=user />
             <CheckinPage user=user />
             <EvidenceUploadPage user=user />
-            <EvidenceSearchPage />
+            <EvidenceSearchPage user=user />
             <AddressBookPage />
             <ProfilePage user=user />
+
+            // Admin operations — only visible to administrators
+            {move || is_admin().then(|| view! { <AdminPage /> })}
         </div>
     }
 }

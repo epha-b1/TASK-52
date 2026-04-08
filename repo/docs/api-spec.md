@@ -213,6 +213,8 @@ Query params: `from`, `to`, `status`, `intake_type`, `region`, `tags`, `q`
 CSV export with same filter params as summary.
 
 ### GET /reports/adoption-conversion
+- Query params: `from` (ISO date), `to` (ISO date) — optional period filter
+- Returns `{ total, adopted, conversion_rate }` scoped to `intake_type='animal'`
 
 ## Audit Logs
 

@@ -18,18 +18,23 @@ impl std::fmt::Display for ApiError {
 
 async fn parse_error(resp: gloo_net::http::Response) -> ApiError {
     let status = resp.status();
-    // Session expired mid-action: flash a user-visible message and preserve
-    // the current route so the app shell can restore the same page after
-    // re-login. Any active draft stays in localStorage untouched.
+    // ── Centralized 401 handling (app-wide) ────────────────────────────
+    // On ANY 401 from ANY API call, immediately:
+    //   1. Flash a "session expired" message
+    //   2. Preserve the current browser route for post-login restore
+    //   3. Force a page reload — the app mount checks /auth/me, sees 401,
+    //      and lands on Login with the preserved route + flash message.
+    // This ensures stale dashboard/form state is never left visible after
+    // session expiry, regardless of which component triggered the call.
     if status == 401 {
         crate::draft::flash_session_expired();
-        // Best-effort route capture — the browser's location hash/path is
-        // what the app shell uses as its route key.
         #[cfg(target_arch = "wasm32")]
         if let Some(w) = web_sys::window() {
             if let Ok(p) = w.location().pathname() {
                 crate::draft::preserve_route(&p);
             }
+            // Force reload to clear all stale component state.
+            let _ = w.location().reload();
         }
     }
     match resp.json::<ErrorResponse>().await {
@@ -446,6 +451,85 @@ pub fn build_export_url(
 
 pub async fn adoption_conversion() -> Result<serde_json::Value, ApiError> {
     let resp = Request::get("/reports/adoption-conversion").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Evidence Linking + Legal Hold ──────────────────────────────────
+
+pub async fn link_evidence(evidence_id: &str, target_type: &str, target_id: &str) -> Result<serde_json::Value, ApiError> {
+    let body = serde_json::json!({"target_type": target_type, "target_id": target_id});
+    let resp = Request::post(&format!("/evidence/{}/link", evidence_id))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn set_legal_hold(evidence_id: &str, hold: bool) -> Result<serde_json::Value, ApiError> {
+    let body = serde_json::json!({"legal_hold": hold});
+    let resp = Request::patch(&format!("/evidence/{}/legal-hold", evidence_id))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .map_err(|e| ApiError { status: 0, code: "REQUEST".into(), message: format!("{:?}", e) })?
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn delete_evidence(evidence_id: &str) -> Result<serde_json::Value, ApiError> {
+    let resp = Request::delete(&format!("/evidence/{}", evidence_id)).send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+// ── Admin Operations ───────────────────────────────────────────────
+
+pub async fn admin_get_config() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::get("/admin/config").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn admin_config_versions() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::get("/admin/config/versions").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn admin_rollback(version_id: &str) -> Result<serde_json::Value, ApiError> {
+    let resp = Request::post(&format!("/admin/config/rollback/{}", version_id))
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn admin_export_diagnostics() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::post("/admin/diagnostics/export")
+        .send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn admin_jobs() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::get("/admin/jobs").send().await
+        .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
+    if !resp.ok() { return Err(parse_error(resp).await); }
+    resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })
+}
+
+pub async fn admin_logs() -> Result<serde_json::Value, ApiError> {
+    let resp = Request::get("/admin/logs").send().await
         .map_err(|e| ApiError { status: 0, code: "NETWORK".into(), message: e.to_string() })?;
     if !resp.ok() { return Err(parse_error(resp).await); }
     resp.json().await.map_err(|e| ApiError { status: 0, code: "PARSE".into(), message: e.to_string() })

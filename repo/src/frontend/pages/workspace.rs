@@ -17,10 +17,24 @@ pub fn WorkspacePage() -> impl IntoView {
     let (feedback, set_feedback) = create_signal(String::new());
     let (biometric_on, set_biometric_on) = create_signal(false);
 
-    // Load on mount
+    // Load on mount — filter to today's records for the workspace view.
     spawn_local(async move {
         match client::list_intake().await {
-            Ok(list) => { set_intake.set(list); set_feedback.set("Saved locally".into()); }
+            Ok(list) => {
+                // Filter to today's date (YYYY-MM-DD prefix match on created_at).
+                let today = {
+                    let d = js_sys::Date::new_0();
+                    format!("{:04}-{:02}-{:02}",
+                        d.get_full_year(),
+                        d.get_month() + 1,
+                        d.get_date())
+                };
+                let todays: Vec<_> = list.into_iter()
+                    .filter(|i| i.created_at.starts_with(&today))
+                    .collect();
+                set_intake.set(todays);
+                set_feedback.set("Saved locally".into());
+            }
             Err(e) => set_feedback.set(format!("Error: {}", e.message)),
         }
     });

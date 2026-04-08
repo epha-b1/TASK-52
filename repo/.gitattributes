@@ -1,0 +1,16 @@
+# Enforce LF line endings for all files that run inside Linux containers.
+# This prevents Windows Git (core.autocrlf=true) from injecting \r\n into
+# shell scripts, which causes "exec format error" or "no such file or
+# directory" when the container tries to execute them.
+
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.toml      text eol=lf
+*.rs        text eol=lf
+*.sql       text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf

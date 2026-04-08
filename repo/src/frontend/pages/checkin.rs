@@ -10,7 +10,12 @@ pub fn CheckinPage(user: ReadSignal<Option<UserResponse>>) -> impl IntoView {
     let (err, set_err) = create_signal(Option::<String>::None);
     let (show_add, set_show_add) = create_signal(false);
     let (checkin_id, set_checkin_id) = create_signal(String::new());
+    let (manual_id, set_manual_id) = create_signal(String::new());
     let (loading, set_loading) = create_signal(false);
+
+    // Admin override controls
+    let (use_override, set_use_override) = create_signal(false);
+    let (override_reason, set_override_reason) = create_signal(String::new());
 
     let refresh = move || {
         spawn_local(async move {
@@ -29,20 +34,47 @@ pub fn CheckinPage(user: ReadSignal<Option<UserResponse>>) -> impl IntoView {
     };
 
     let do_checkin = move |_| {
-        let mid = checkin_id.get();
-        if mid.is_empty() { set_err.set(Some("Select a member".into())); return; }
+        // Use manual entry if provided, otherwise use dropdown selection
+        let mid = {
+            let m = manual_id.get();
+            if !m.trim().is_empty() { m } else { checkin_id.get() }
+        };
+        if mid.is_empty() {
+            set_err.set(Some("Enter or select a member ID".into()));
+            return;
+        }
+
+        // Validate override reason if override is toggled
+        let reason = if use_override.get() {
+            let r = override_reason.get();
+            if r.trim().is_empty() {
+                set_err.set(Some("Override reason is required when override is enabled".into()));
+                return;
+            }
+            Some(r)
+        } else {
+            None
+        };
+
         set_loading.set(true);
         set_err.set(None);
         set_msg.set(None);
         let refresh = refresh.clone();
         spawn_local(async move {
-            let req = CheckinRequest { member_id: mid, override_reason: None };
+            let req = CheckinRequest { member_id: mid, override_reason: reason };
             match client::checkin(&req).await {
                 Ok(r) => {
-                    set_msg.set(Some(format!("Checked in: {}", r.member_id)));
+                    let override_note = if r.was_override { " (admin override)" } else { "" };
+                    set_msg.set(Some(format!("Checked in: {}{}", r.member_id, override_note)));
+                    set_manual_id.set(String::new());
+                    set_use_override.set(false);
+                    set_override_reason.set(String::new());
                     refresh();
                 }
-                Err(e) => set_err.set(Some(e.message)),
+                Err(e) => {
+                    // Show anti-passback retry info if present
+                    set_err.set(Some(e.message));
+                }
             }
             set_loading.set(false);
         });
@@ -55,14 +87,49 @@ pub fn CheckinPage(user: ReadSignal<Option<UserResponse>>) -> impl IntoView {
             {move || err.get().map(|e| view! { <div class="msg msg-error">{e}</div> })}
 
             <div class="checkin-controls">
-                <select on:change=move |e| set_checkin_id.set(event_target_value(&e))>
-                    <option value="">"-- Select Member --"</option>
-                    {move || members.get().into_iter().map(|m| {
-                        let mid = m.member_id.clone();
-                        let label = format!("{} ({})", m.name, m.member_id);
-                        view! { <option value={mid}>{label}</option> }
-                    }).collect_view()}
-                </select>
+                // Manual member ID entry (barcode/scan target)
+                <div class="form-group">
+                    <label>"Member ID (type or scan)"</label>
+                    <input placeholder="Enter member ID directly"
+                        prop:value=manual_id
+                        on:input=move |e| set_manual_id.set(event_target_value(&e))
+                        disabled=move || loading.get() />
+                </div>
+
+                // Dropdown fallback
+                <div class="form-group">
+                    <label>"Or select from list"</label>
+                    <select on:change=move |e| set_checkin_id.set(event_target_value(&e))
+                        disabled=move || loading.get()>
+                        <option value="">"-- Select Member --"</option>
+                        {move || members.get().into_iter().map(|m| {
+                            let mid = m.member_id.clone();
+                            let label = format!("{} ({})", m.name, m.member_id);
+                            view! { <option value={mid}>{label}</option> }
+                        }).collect_view()}
+                    </select>
+                </div>
+
+                // Admin override toggle (only visible to administrators)
+                {move || is_admin().then(|| view! {
+                    <div class="form-group override-section">
+                        <label class="checkbox-label">
+                            <input type="checkbox"
+                                prop:checked=move || use_override.get()
+                                on:change=move |e| set_use_override.set(event_target_checked(&e))
+                                disabled=move || loading.get() />
+                            " Override anti-passback (admin only)"
+                        </label>
+                        {move || use_override.get().then(|| view! {
+                            <input placeholder="Override reason (required)"
+                                prop:value=override_reason
+                                on:input=move |e| set_override_reason.set(event_target_value(&e))
+                                disabled=move || loading.get()
+                                required=true />
+                        })}
+                    </div>
+                })}
+
                 <button class="btn" on:click=do_checkin disabled=move || loading.get()>
                     {move || if loading.get() { "Processing..." } else { "Check In" }}
                 </button>
@@ -97,10 +164,6 @@ pub fn CheckinPage(user: ReadSignal<Option<UserResponse>>) -> impl IntoView {
                     }
                 }}
             </section>
-
-            {move || is_admin().then(|| view! {
-                <p class="muted">"As admin, you can override anti-passback via the API with override_reason."</p>
-            })}
         </div>
     }
 }

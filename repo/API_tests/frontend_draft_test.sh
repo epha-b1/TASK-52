@@ -139,6 +139,57 @@ else
 fi
 rm -f "$CK"
 
+# ─── 5. New frontend flows wired into bundle ────────────────────────
+echo ""
+echo "━━━ 5. New UI flow components in WASM bundle ━━━"
+
+# Evidence linking: the EvidenceLinkForm component uses these identifiers
+for literal in \
+    "Link" \
+    "target_type" \
+    "target_id" \
+    "legal_hold" ; do
+    if echo "$STRINGS" | grep -q "$literal"; then
+        echo "PASS: WASM contains \"$literal\" (evidence link/hold UI present)"; PASS=$((PASS+1))
+    else
+        echo "FAIL: WASM missing \"$literal\" (evidence link UI not compiled)"; FAIL=$((FAIL+1))
+    fi
+done
+
+# Check-in override: the override controls use these strings
+for literal in \
+    "override_reason" \
+    "Override anti-passback" \
+    "Override reason" ; do
+    if echo "$STRINGS" | grep -q "$literal"; then
+        echo "PASS: WASM contains \"$literal\" (check-in override UI present)"; PASS=$((PASS+1))
+    else
+        echo "FAIL: WASM missing \"$literal\" (check-in override UI not compiled)"; FAIL=$((FAIL+1))
+    fi
+done
+
+# Admin page: component renders these identifiers
+for literal in \
+    "Admin Operations" \
+    "Config Version History" \
+    "Export Diagnostics" \
+    "Background Jobs" \
+    "Recent Logs" \
+    "Rollback" ; do
+    if echo "$STRINGS" | grep -q "$literal"; then
+        echo "PASS: WASM contains \"$literal\" (admin page compiled)"; PASS=$((PASS+1))
+    else
+        echo "FAIL: WASM missing \"$literal\" (admin page not compiled)"; FAIL=$((FAIL+1))
+    fi
+done
+
+# Session expiry: centralized 401 triggers reload
+if echo "$STRINGS" | grep -q "reload"; then
+    echo "PASS: WASM contains \"reload\" (centralized 401 handler present)"; PASS=$((PASS+1))
+else
+    echo "FAIL: WASM missing \"reload\" (centralized 401 handler not compiled)"; FAIL=$((FAIL+1))
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────
 echo ""
 echo "========================================"

@@ -103,11 +103,17 @@ pub async fn summary(
 
 #[derive(serde::Serialize)]
 struct Metrics {
+    // Filtered by intake query params (from/to/status/intake_type/region/tags/q)
     rescue_volume: i64,
     adoption_conversion: f64,
-    task_completion_rate: f64,
     donations_logged: i64,
+    // Global metrics — NOT scoped by intake filters because tasks and
+    // inventory are separate domains that don't link to intake_records.
+    // These are explicitly labeled so consumers know the scope.
+    task_completion_rate: f64,
+    task_completion_scope: &'static str,
     inventory_on_hand: i64,
+    inventory_scope: &'static str,
     filters: serde_json::Value,
 }
 
@@ -207,9 +213,11 @@ async fn compute_metrics(
     Ok(Metrics {
         rescue_volume: intake_total,
         adoption_conversion,
-        task_completion_rate,
         donations_logged: donations,
+        task_completion_rate,
+        task_completion_scope: "global (all tasks, not filtered by intake params)",
         inventory_on_hand,
+        inventory_scope: "global (all stock movements, not filtered by intake params)",
         filters: serde_json::json!({
             "from": f.from,
             "to": f.to,

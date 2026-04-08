@@ -575,6 +575,76 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+# 11. EVIDENCE FILE LIFECYCLE — canonical path + physical cleanup
+# ═══════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 11. Evidence file lifecycle (upload_id vs evidence_id) ━━━"
+
+# Upload a photo, get its evidence_id, then verify the file exists at
+# the evidence_id-based canonical path (not the upload_id path).
+LCBODY=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
+  -d '{"filename":"lifecycle.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
+LCUID=$(echo "$LCBODY" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
+curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
+  -d "{\"upload_id\":\"$LCUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
+LC_FP=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' | sha256sum | cut -d' ' -f1)
+LCRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
+  -d "{\"upload_id\":\"$LCUID\",\"fingerprint\":\"$LC_FP\",\"total_size\":1024}")
+LCEID=$(echo "$LCRESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Verify: file should exist at evidence_id path, NOT at upload_id path
+if [ -f "/app/storage/uploads/${LCEID}_final" ]; then
+    echo "PASS: File exists at canonical evidence_id path"; PASS=$((PASS+1))
+else
+    echo "FAIL: File missing at evidence_id path /app/storage/uploads/${LCEID}_final"; FAIL=$((FAIL+1))
+fi
+if [ ! -f "/app/storage/uploads/${LCUID}_final" ]; then
+    echo "PASS: No orphan file at upload_id path"; PASS=$((PASS+1))
+else
+    echo "FAIL: Orphan file exists at upload_id path"; FAIL=$((FAIL+1))
+fi
+
+# Verify: DELETE physically removes the file
+R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X DELETE "$BASE/evidence/$LCEID")
+check "DELETE evidence → 200" "200" "$R"
+if [ ! -f "/app/storage/uploads/${LCEID}_final" ]; then
+    echo "PASS: File physically removed after DELETE"; PASS=$((PASS+1))
+else
+    echo "FAIL: File still on disk after DELETE"; FAIL=$((FAIL+1))
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+# 12. WATERMARK — watermark_text present in response
+# ═══════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 12. Watermark behavior ━━━"
+
+# Upload a photo and verify watermark_text is in the response
+WMBODY=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
+  -d '{"filename":"wm.jpg","media_type":"photo","total_size":1024,"duration_seconds":0}')
+WMUID=$(echo "$WMBODY" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
+curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
+  -d "{\"upload_id\":\"$WMUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
+WMRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
+  -d "{\"upload_id\":\"$WMUID\",\"fingerprint\":\"$LC_FP\",\"total_size\":1024}")
+
+# Watermark text must contain facility code and timestamp pattern
+if echo "$WMRESP" | grep -qE '"watermark_text":"FAC01 [0-9]{2}/[0-9]{2}/[0-9]{4} [0-9]{2}:[0-9]{2} (AM|PM)"'; then
+    echo "PASS: Watermark text matches FAC01 MM/DD/YYYY hh:mm AM/PM"; PASS=$((PASS+1))
+else
+    echo "FAIL: Watermark text format wrong: $WMRESP"; FAIL=$((FAIL+1))
+fi
+
+# Verify storage_path is tracked in DB (evidence has canonical path)
+WMEID=$(echo "$WMRESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+SP=$(sql "SELECT storage_path FROM evidence_records WHERE id='$WMEID';")
+if echo "$SP" | grep -q "${WMEID}_final"; then
+    echo "PASS: storage_path in DB contains evidence_id"; PASS=$((PASS+1))
+else
+    echo "FAIL: storage_path missing or wrong: $SP"; FAIL=$((FAIL+1))
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 # Summary
 # ═══════════════════════════════════════════════════════════════════════
 echo ""

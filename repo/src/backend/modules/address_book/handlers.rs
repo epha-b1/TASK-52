@@ -74,7 +74,7 @@ pub async fn create(
         id, label: body.label,
         street_masked: crypto::mask_street(&body.street),
         city_masked: crypto::mask_city(&body.city),
-        state: body.state, zip_plus4: body.zip_plus4,
+        state: body.state, zip_masked: crypto::mask_zip(&body.zip_plus4),
         phone_masked: crypto::mask_phone(&body.phone), created_at: String::new(),
     })))
 }
@@ -113,7 +113,7 @@ pub async fn update(
         id: addr_id, label: body.label,
         street_masked: crypto::mask_street(&body.street),
         city_masked: crypto::mask_city(&body.city),
-        state: body.state, zip_plus4: body.zip_plus4,
+        state: body.state, zip_masked: crypto::mask_zip(&body.zip_plus4),
         phone_masked: crypto::mask_phone(&body.phone), created_at: String::new(),
     }))
 }
@@ -152,7 +152,7 @@ fn to_response(c: &crypto::Crypto, r: AddrRow) -> AddressResponse {
         street_masked: crypto::mask_street(&street),
         city_masked: crypto::mask_city(&city),
         state,
-        zip_plus4: r.zip_plus4,
+        zip_masked: crypto::mask_zip(&r.zip_plus4),
         phone_masked: crypto::mask_phone(&phone),
         created_at: r.created_at,
     }

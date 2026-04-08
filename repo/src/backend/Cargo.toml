@@ -24,4 +24,5 @@ aes-gcm = "0.10"
 base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 fieldtrace-shared = { path = "../shared" }

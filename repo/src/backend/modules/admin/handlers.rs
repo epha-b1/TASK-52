@@ -354,7 +354,7 @@ pub async fn run_evidence_retention(
         return Err(AppError::validation("max_age_days must be >= 0", t));
     }
 
-    let deleted = crate::jobs::run_evidence_retention(&state.db, days).await
+    let deleted = crate::jobs::run_evidence_retention(&state.db, days, Some(&state.config.storage_dir)).await
         .map_err(|e| {
             tracing::error!(trace_id = %t, error = %e, "manual retention sweep failed");
             AppError::internal("Internal server error", t)

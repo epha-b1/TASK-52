@@ -12,6 +12,7 @@ services:
       ENCRYPTION_KEY: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
       ENCRYPTION_KEY_FILE: "/app/storage/encryption.key"
       COOKIE_SECURE: "false"
+      FACILITY_TZ_OFFSET_HOURS: "0"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 10s

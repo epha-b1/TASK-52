@@ -116,6 +116,7 @@ All environment variables are defined inline in `docker-compose.yml`. No `.env` 
 | ENCRYPTION_KEY_FILE | (unset) | Optional path to a file holding the hex key. If set, takes precedence over `ENCRYPTION_KEY` and is written to on `/admin/security/rotate-key` |
 | FACILITY_CODE | FAC01 | Facility code used in watermarks and traceability codes. Defaults to the DB seed value |
 | COOKIE_SECURE | false | When `true`, adds the `Secure` attribute to session cookies (HTTPS-only). Set to `true` in production |
+| FACILITY_TZ_OFFSET_HOURS | 0 | Integer hours offset from UTC for watermark/traceability timestamps. E.g. `-5` for EST, `-8` for PST. Ensures watermarks reflect local facility time |
 
 ## Role matrix (enforced server-side)
 
@@ -347,25 +348,36 @@ Enforcement happens in two places:
   immediately — integration tests use `max_age_days: 0` to drive a
   deterministic same-second sweep.
 
-### Evidence storage (no in-process transcoding)
+### Media processing policy
 
-The backend stores the **original uploaded file unchanged** on disk.
-Real media transcoding (JPEG re-encode, H.264, AAC) is NOT performed
-in-process — that requires a full media codec library (ffmpeg/libavcodec)
-which is outside the current dependency scope.
+At `POST /media/upload/complete`, evidence files are processed through
+three stages: compression, watermark burn-in, and canonical storage.
 
-The compression metadata fields in evidence records reflect the **actual
-stored file**:
+**Compression:**
 
-| Field | Value | Meaning |
-| ----- | ----- | ------- |
-| `compressed_bytes` | actual file size on disk | Real stored size |
-| `compression_ratio` | 1.0 | No compression applied |
-| `compression_applied` | false | No transcoding performed |
+| Media type | Behavior | Library |
+| ---------- | -------- | ------- |
+| **Photo** | JPEG re-encode at quality 80. Replaces original if smaller. | `image` crate (pure Rust) |
+| **Video** | Stored at original quality (H.264 transcoding requires ffmpeg). | N/A |
+| **Audio** | Stored at original quality (AAC transcoding requires ffmpeg). | N/A |
 
-These fields are reserved for future integration with an external offline
-transcoding pipeline. When such a pipeline is added, it would re-encode
-the file and update these fields with real output sizes.
+**Visible watermark:**
+
+| Media type | Behavior |
+| ---------- | -------- |
+| **Photo** | Watermark text (`FAC01 MM/DD/YYYY hh:mm AM/PM`) is **burned into the image pixels** — a dark stripe with white text is rendered at the bottom of the photo. The watermark is physically present in the stored JPEG file. |
+| **Video** | Watermark text is stored as metadata (`watermark_text` field). The frontend renders it as an overlay during playback. Pixel-level burn-in would require ffmpeg. |
+| **Audio** | Watermark text stored as metadata only (audio has no visual surface). |
+
+**File storage:**
+
+Each evidence file is stored at `{STORAGE_DIR}/uploads/{evidence_id}_final`.
+The canonical path is persisted in the `storage_path` column of
+`evidence_records`. Both `DELETE /evidence/:id` and the retention purge
+job use this path to reliably clean up on-disk files.
+
+The `compressed_bytes`, `compression_ratio`, and `compression_applied`
+fields reflect the **actual stored file** after all processing.
 
 ### Draft autosave and session-expiry restore
 

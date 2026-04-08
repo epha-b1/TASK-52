@@ -23,6 +23,9 @@ pub fn register_all(db: SqlitePool, config: Config) {
     tokio::spawn(async move { diagnostics_cleanup_loop(d3, c3).await; });
     let d4 = db.clone();
     tokio::spawn(async move { evidence_retention_loop(d4).await; });
+    let d5 = db.clone();
+    let c5 = config.clone();
+    tokio::spawn(async move { stale_upload_cleanup_loop(d5, c5).await; });
     tracing::info!("All background jobs registered");
 }
 
@@ -213,7 +216,7 @@ async fn evidence_retention_loop(db: SqlitePool) {
     let mut ticker = tokio::time::interval(Duration::from_secs(3600));
     loop {
         ticker.tick().await;
-        match run_evidence_retention(&db, 365).await {
+        match run_evidence_retention(&db, 365, None).await {
             Ok(deleted) => {
                 tracing::info!(job = "evidence_retention", deleted, "retention sweep");
                 record_run(&db, "evidence_retention", "ok", None).await;
@@ -237,7 +240,7 @@ async fn evidence_retention_loop(db: SqlitePool) {
 /// Callable from the background loop and from the admin endpoint
 /// `POST /admin/retention-purge` (GDPR/operator tool + deterministic test
 /// driver via `max_age_days: 0`).
-pub async fn run_evidence_retention(db: &SqlitePool, max_age_days: i64) -> Result<usize, String> {
+pub async fn run_evidence_retention(db: &SqlitePool, max_age_days: i64, storage_dir: Option<&str>) -> Result<usize, String> {
     if max_age_days < 0 {
         return Err("max_age_days must be >= 0".into());
     }
@@ -245,8 +248,8 @@ pub async fn run_evidence_retention(db: &SqlitePool, max_age_days: i64) -> Resul
 
     // Snapshot victims before deletion so we can (a) log how many we touched
     // and (b) emit an auditable structured log entry per row.
-    let victims: Vec<(String,)> = sqlx::query_as(
-        "SELECT id FROM evidence_records \
+    let victims: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, storage_path FROM evidence_records \
          WHERE linked = 0 \
            AND legal_hold = 0 \
            AND created_at <= datetime('now', ?)",
@@ -258,6 +261,18 @@ pub async fn run_evidence_retention(db: &SqlitePool, max_age_days: i64) -> Resul
 
     if victims.is_empty() {
         return Ok(0);
+    }
+
+    // Clean up stored files from disk using the canonical path from DB.
+    for (id, path) in &victims {
+        let file = if !path.is_empty() {
+            path.clone()
+        } else if let Some(dir) = storage_dir {
+            format!("{}/uploads/{}_final", dir, id)
+        } else {
+            continue;
+        };
+        let _ = std::fs::remove_file(&file);
     }
 
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
@@ -303,4 +318,36 @@ pub async fn run_evidence_retention(db: &SqlitePool, max_age_days: i64) -> Resul
     ).await;
 
     Ok(deleted)
+}
+
+// ── Stale upload session cleanup ────────────────────────────────────
+
+async fn stale_upload_cleanup_loop(db: SqlitePool, config: Config) {
+    tracing::info!(job = "stale_upload_cleanup", "Registered (every 30 min)");
+    let mut ticker = tokio::time::interval(Duration::from_secs(1800));
+    loop {
+        ticker.tick().await;
+        // Delete upload sessions stuck in 'in_progress' for > 24 hours,
+        // plus their chunk files on disk.
+        let stale: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM upload_sessions \
+             WHERE status = 'in_progress' \
+               AND created_at <= datetime('now', '-24 hours')"
+        ).fetch_all(&db).await.unwrap_or_default();
+
+        let mut cleaned = 0usize;
+        for (session_id,) in &stale {
+            // Remove chunk directory
+            let chunk_dir = format!("{}/uploads/{}", config.storage_dir, session_id);
+            let _ = std::fs::remove_dir_all(&chunk_dir);
+            // Remove from DB
+            let _ = sqlx::query("DELETE FROM upload_sessions WHERE id = ?")
+                .bind(session_id).execute(&db).await;
+            cleaned += 1;
+        }
+        if cleaned > 0 {
+            tracing::info!(job = "stale_upload_cleanup", cleaned, "cleaned stale uploads");
+        }
+        record_run(&db, "stale_upload_cleanup", "ok", None).await;
+    }
 }

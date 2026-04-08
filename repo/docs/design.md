@@ -33,21 +33,21 @@ FieldTrace is an offline-first shelter and warehouse management system built wit
 
 ## Database Schema (13 migrations)
 
-| Migration | Tables |
-|-----------|--------|
+| Migration | Creates/Alters |
+|-----------|----------------|
 | 0001_init | sessions, facilities |
 | 0002_auth | users, auth_failures |
 | 0003_address_book | address_book |
 | 0004_intake_inspections | intake_records, inspections |
 | 0005_evidence | evidence_records, upload_sessions, evidence_links, idempotency_keys |
 | 0006_supply_traceability | supply_entries, traceability_codes, traceability_events, traceability_steps |
-| 0007_checkin_dashboard | members, checkin_ledger |
-| 0008_admin_audit | config_versions, audit_logs |
-| 0009_account_deletion | account deletion + anonymization fields |
-| 0010_anonymization | legal hold flags, structured_logs |
-| 0011_evidence_retention | compression metadata columns |
-| 0012_transfers_stock | transfers, stock_movements |
-| 0013_duration_and_privacy | upload_sessions.duration_seconds, privacy_preferences table, supply new fields |
+| 0007_checkin_dashboard | members, checkin_ledger, tasks |
+| 0008_admin_audit | config_versions, job_metrics, audit_logs, structured_logs |
+| 0009_account_deletion | ALTER users ADD deletion_requested_at + index |
+| 0010_anonymization | ALTER users ADD anonymized + index |
+| 0011_evidence_retention | ALTER evidence_records ADD compressed_bytes/ratio/applied + retention index |
+| 0012_transfers_stock | transfers, stock_movements + intake filter columns (region, tags) |
+| 0013_duration_and_privacy | ALTER upload_sessions ADD duration_seconds, privacy_preferences table, ALTER supply_entries ADD media_references/review_summary |
 
 ## Security Controls
 
@@ -155,20 +155,35 @@ summary) counts only `intake_type = 'animal' AND status = 'adopted'` in the
 numerator, with all animal records as the denominator. This ensures the metric
 is not skewed by non-animal records.
 
-## Evidence Storage (No In-Process Transcoding)
+## Media Processing Pipeline
 
-The backend stores original uploaded files **unchanged** on disk. Real media
-transcoding (JPEG re-encode, H.264, AAC) is NOT performed in-process — that
-requires a full media codec library (ffmpeg/libavcodec) outside the current
-dependency scope.
+At `upload_complete`, evidence files go through three stages:
 
-Compression metadata fields reflect the **actual stored file**:
-- `compressed_bytes` = real file size on disk (equals original)
-- `compression_ratio` = 1.0 (no compression performed)
-- `compression_applied` = false
+### 1. Compression
+- **Photo**: JPEG re-encode at quality 80 via `image` crate (pure Rust).
+  If the result is smaller, replaces original on disk. If decode fails,
+  original is kept unchanged.
+- **Video/Audio**: Stored at original quality. Real H.264/AAC transcoding
+  requires ffmpeg/libavcodec, outside current dependency scope.
 
-These fields are reserved for future integration with an external offline
-transcoding pipeline.
+### 2. Visible Watermark
+- **Photo**: Watermark text (facility code + local timestamp) is **burned
+  into the image pixels** — a dark semi-transparent stripe with white text
+  is rendered at the bottom of the image and re-encoded as JPEG. The
+  watermark is physically present in the stored file.
+- **Video**: Watermark text is stored as metadata in `watermark_text`
+  column. The frontend renders it as an overlay during playback. Pixel-level
+  burn-in would require ffmpeg (same as video transcoding).
+- **Audio**: Watermark text stored as metadata only (no visual surface).
+
+### 3. Canonical File Storage
+Each evidence file is stored at `{STORAGE_DIR}/uploads/{evidence_id}_final`.
+The path is persisted in `evidence_records.storage_path` (added in migration
+0014). This eliminates the previous `upload_id` vs `evidence_id` mismatch
+that caused orphaned files on delete/retention.
+
+All metadata fields (`compressed_bytes`, `compression_ratio`,
+`compression_applied`) reflect the **actual stored file** after processing.
 
 ## Frontend Architecture
 

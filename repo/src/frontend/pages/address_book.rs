@@ -50,7 +50,7 @@ pub fn AddressBookPage() -> impl IntoView {
                     view! {
                         <div class="addr-item">
                             <strong>{a.label}</strong>
-                            <p>{a.street_masked.clone()}", "{a.city_masked.clone()}", "{a.state.clone()}" "{a.zip_plus4.clone()}</p>
+                            <p>{a.street_masked.clone()}", "{a.city_masked.clone()}", "{a.state.clone()}" "{a.zip_masked.clone()}</p>
                             <p>"Phone: "{a.phone_masked.clone()}</p>
                             <button class="btn btn-sm btn-danger" on:click=move |_| {
                                 let id = id.clone();

@@ -108,6 +108,16 @@ pub fn mask_city(city: &str) -> String {
     format!("{}***", &trimmed[..2])
 }
 
+/// Mask a ZIP+4 code to show only the last 4 characters.
+/// "90210-1234" → "***0-1234"; "90210" → "***10"
+pub fn mask_zip(zip: &str) -> String {
+    let trimmed = zip.trim();
+    if trimmed.len() <= 4 {
+        return format!("***{}", trimmed);
+    }
+    format!("***{}", &trimmed[trimmed.len() - 4..])
+}
+
 /// Mask a state: return as-is (typically 2-letter abbreviation, not
 /// considered sensitive on its own without the rest of the address).
 pub fn mask_state(state: &str) -> String {

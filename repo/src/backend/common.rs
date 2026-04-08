@@ -115,8 +115,9 @@ pub fn require_admin_or_auditor(u: &SessionUser, trace_id: &str) -> Result<(), A
 
 // ── Local date/time formatting (no chrono) ────────────────────────────
 
-/// Civil date computed from a Unix timestamp (UTC — acceptable for an
-/// offline facility app where local = facility time).
+/// Civil date computed from a Unix timestamp, adjusted by the facility's
+/// configured timezone offset (`FACILITY_TZ_OFFSET_HOURS`). This ensures
+/// watermarks and traceability codes reflect local facility time.
 #[derive(Debug, Clone, Copy)]
 pub struct CivilDateTime {
     pub year: i32,
@@ -154,9 +155,19 @@ impl CivilDateTime {
         CivilDateTime { year, month: m, day: d, hour, minute, second }
     }
 
+    /// Return the current civil date/time adjusted by the facility's
+    /// timezone offset. The offset is read from `FACILITY_TZ_OFFSET_HOURS`
+    /// (e.g. `-5` for EST, `-8` for PST, `0` for UTC). Defaults to 0.
     pub fn now() -> Self {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-        Self::from_unix(ts)
+        let offset_hours: i64 = std::env::var("FACILITY_TZ_OFFSET_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Self::from_unix(ts + offset_hours * 3600)
     }
 
     /// `YYYYMMDD`

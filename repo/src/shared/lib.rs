@@ -264,7 +264,8 @@ pub struct AddressResponse {
     pub city_masked: String,
     /// State abbreviation (not masked — 2 chars not sensitive alone).
     pub state: String,
-    pub zip_plus4: String,
+    /// Masked ZIP+4 (only last 4 chars visible). E.g. "90210-1234" → "***0-1234".
+    pub zip_masked: String,
     pub phone_masked: String,
     pub created_at: String,
 }

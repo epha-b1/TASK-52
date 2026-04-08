@@ -245,6 +245,10 @@ At `POST /media/upload/complete`, the server:
 
 Photo uploads have no duration constraint.
 
+The `duration_seconds` field in `UploadStartRequest` is an advisory client
+hint — used only for early rejection of obviously over-limit values at
+upload-start. It is never trusted for final acceptance.
+
 ### Privacy preferences
 
 Users can manage their privacy preferences via the profile page:
@@ -343,30 +347,25 @@ Enforcement happens in two places:
   immediately — integration tests use `max_age_days: 0` to drive a
   deterministic same-second sweep.
 
-### Storage budget policy (projected compression metadata)
+### Evidence storage (no in-process transcoding)
 
-**Important:** The backend stores the **original uploaded file unchanged**
-on disk. Real media transcoding (JPEG re-encode, H.264, AAC) is NOT
-performed in-process — that requires a full media codec library (ffmpeg)
+The backend stores the **original uploaded file unchanged** on disk.
+Real media transcoding (JPEG re-encode, H.264, AAC) is NOT performed
+in-process — that requires a full media codec library (ffmpeg/libavcodec)
 which is outside the current dependency scope.
 
-Instead, `POST /media/upload/complete` computes a **projected post-compression
-size** using deterministic per-type ratios based on industry baselines:
+The compression metadata fields in evidence records reflect the **actual
+stored file**:
 
-| Media type | Projected ratio | Floor (skip below) | Basis |
-| ---------- | --------------- | ------------------- | ----- |
-| `photo`    | 0.70            | 256 KiB             | JPEG quality 80 |
-| `video`    | 0.60            | 2 MiB               | H.264 720p/2Mbps |
-| `audio`    | 0.50            | 128 KiB             | AAC-LC 96kbps |
-| other      | 1.00 (skip)     | —                   | — |
+| Field | Value | Meaning |
+| ----- | ----- | ------- |
+| `compressed_bytes` | actual file size on disk | Real stored size |
+| `compression_ratio` | 1.0 | No compression applied |
+| `compression_applied` | false | No transcoding performed |
 
-The `compressed_bytes` field in evidence records reflects this **budget
-projection** — the storage cost the facility should attribute after their
-offline re-encoding pipeline runs. The `compression_applied` flag
-indicates whether the projection differs from original size.
-
-Files at or below the per-type floor pass through unchanged. A guard
-rejects any result with `compressed_bytes > size_bytes`.
+These fields are reserved for future integration with an external offline
+transcoding pipeline. When such a pipeline is added, it would re-encode
+the file and update these fields with real output sizes.
 
 ### Draft autosave and session-expiry restore
 

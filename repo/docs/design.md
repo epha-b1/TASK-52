@@ -155,14 +155,20 @@ summary) counts only `intake_type = 'animal' AND status = 'adopted'` in the
 numerator, with all animal records as the denominator. This ensures the metric
 is not skewed by non-animal records.
 
-## Storage Budget Policy (Compression Metadata)
+## Evidence Storage (No In-Process Transcoding)
 
-The backend stores original uploaded files unchanged on disk. Real media
-transcoding is NOT performed in-process. Instead, `compressed_bytes` reflects a
-**projected post-compression size** using per-type industry baselines (photo 0.70x,
-video 0.60x, audio 0.50x). This is metadata for storage budget planning, not
-an assertion that transcoding occurred. The `compression_applied` flag indicates
-whether the projection differs from original size.
+The backend stores original uploaded files **unchanged** on disk. Real media
+transcoding (JPEG re-encode, H.264, AAC) is NOT performed in-process — that
+requires a full media codec library (ffmpeg/libavcodec) outside the current
+dependency scope.
+
+Compression metadata fields reflect the **actual stored file**:
+- `compressed_bytes` = real file size on disk (equals original)
+- `compression_ratio` = 1.0 (no compression performed)
+- `compression_applied` = false
+
+These fields are reserved for future integration with an external offline
+transcoding pipeline.
 
 ## Frontend Architecture
 

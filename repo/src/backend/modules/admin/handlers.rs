@@ -443,24 +443,50 @@ pub async fn rotate_key(
 
     // (Future: rotate other encrypted-at-rest fields here inside the same tx.)
 
-    tx.commit().await.map_err(db_err(t))?;
+    // ── Crash-safe key persistence ─────────────────────────────────────
+    // Write the new key to the key file BEFORE committing the DB tx.
+    // This way, if the file write fails we can abort without touching the
+    // DB. If the DB commit fails after the file is written, we restore
+    // the old key to the file. At no point do we leave DB and file out
+    // of sync without recovery.
+    let key_path = state.config.encryption_key_file.as_ref().unwrap(); // safe: checked above
+    let old_key_backup = std::fs::read_to_string(key_path).ok();
 
-    // Swap in-memory cipher only AFTER the DB has committed.
-    state.set_crypto(new_crypto);
-
-    // Persist the new key to the key file if one is configured. We avoid
-    // writing the key to logs.
-    if let Some(ref path) = state.config.encryption_key_file {
-        if let Err(e) = std::fs::write(path, &body.new_key_hex) {
-            tracing::error!(trace_id = %t, error = %e, "Failed to persist new key to file");
-            // DB was already updated. Return partial success signal.
-            return Ok(Json(serde_json::json!({
-                "message": "Key rotation committed but key file write failed. Restart will use env ENCRYPTION_KEY.",
-                "rotated_rows": rotated,
-                "persisted_to_file": false
-            })));
-        }
+    // Atomic write: temp file → fsync → rename
+    let tmp_path = format!("{}.tmp", key_path);
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
+            tracing::error!(trace_id = %t, error = %e, "Failed to create temp key file");
+            AppError::internal("Key rotation failed — could not write key file", t)
+        })?;
+        f.write_all(body.new_key_hex.as_bytes()).map_err(|e| {
+            tracing::error!(trace_id = %t, error = %e, "Failed to write temp key file");
+            AppError::internal("Key rotation failed — could not write key file", t)
+        })?;
+        f.sync_all().map_err(|e| {
+            tracing::error!(trace_id = %t, error = %e, "Failed to fsync temp key file");
+            AppError::internal("Key rotation failed — could not persist key file", t)
+        })?;
     }
+    std::fs::rename(&tmp_path, key_path).map_err(|e| {
+        tracing::error!(trace_id = %t, error = %e, "Failed to rename temp key file");
+        let _ = std::fs::remove_file(&tmp_path);
+        AppError::internal("Key rotation failed — could not persist key file", t)
+    })?;
+
+    // Key file is now durably written with the new key. Commit the DB tx.
+    if let Err(e) = tx.commit().await {
+        // DB commit failed — restore the old key file so restart is safe.
+        tracing::error!(trace_id = %t, error = %e, "DB commit failed during key rotation — restoring old key file");
+        if let Some(ref old_key) = old_key_backup {
+            let _ = std::fs::write(key_path, old_key);
+        }
+        return Err(db_err(t)(e));
+    }
+
+    // Both file and DB are consistent. Swap in-memory cipher.
+    state.set_crypto(new_crypto);
 
     crate::modules::audit::write(
         &state.db, &user.user_id, "admin.security.rotate_key", "crypto", "", t,
@@ -469,6 +495,6 @@ pub async fn rotate_key(
     Ok(Json(serde_json::json!({
         "message": "Key rotation complete",
         "rotated_rows": rotated,
-        "persisted_to_file": state.config.encryption_key_file.is_some()
+        "persisted_to_file": true
     })))
 }

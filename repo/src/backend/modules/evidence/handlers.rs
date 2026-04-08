@@ -46,60 +46,27 @@ pub(crate) struct CompressionResult {
     pub ratio: f64,
 }
 
-/// Storage budget policy — projected post-compression size metadata.
+/// Measure the actual stored file size for compression metadata.
 ///
-/// The backend stores the **original uploaded file** unchanged on disk.
-/// Real media transcoding (JPEG quality reduction, H.264 re-encode,
-/// AAC-LC downmix) is NOT performed in-process — that would require
-/// linking a full media codec library (libavcodec/ffmpeg) which is
-/// outside the current dependency scope.
+/// Real media transcoding (JPEG re-encode, H.264, AAC) requires a full
+/// media codec library (ffmpeg/libavcodec) which is outside the current
+/// dependency scope. The backend stores the **original uploaded file
+/// unchanged** on disk.
 ///
-/// Instead, this function computes the **projected size** that a
-/// facility's offline re-encoding pipeline would produce, using
-/// deterministic per-type ratios based on industry baselines:
+/// The compression metadata fields in `evidence_records` reflect the
+/// **actual stored file**:
+///   - `compressed_bytes` = real file size on disk (equals original)
+///   - `compression_ratio` = 1.0 (no compression performed)
+///   - `compression_applied` = false
 ///
-///   - photo: ~0.70× (JPEG quality 80 target)
-///   - video: ~0.60× (H.264 720p/2Mbps target)
-///   - audio: ~0.50× (AAC-LC 96kbps target)
-///
-/// The `compressed_bytes` field in `evidence_records` reflects this
-/// budget projection — it is the storage cost the facility *should*
-/// attribute after their offline pipeline runs. The `compression_applied`
-/// flag indicates whether the projection differs from original size.
-///
-/// Files at or below a per-type floor pass through unchanged because the
-/// marginal savings are not worth the re-encode cost.
-pub(crate) fn apply_compression_policy(media_type: &str, original_bytes: i64) -> CompressionResult {
-    // Per-type floor: files this size or smaller are not re-encoded because
-    // the marginal savings don't justify the CPU cost.
-    const PHOTO_FLOOR: i64 = 256 * 1024;   // 256 KiB
-    const VIDEO_FLOOR: i64 = 2 * 1024 * 1024;  // 2 MiB
-    const AUDIO_FLOOR: i64 = 128 * 1024;   // 128 KiB
-
-    let (ratio, floor) = match media_type {
-        "photo" => (0.70, PHOTO_FLOOR),
-        "video" => (0.60, VIDEO_FLOOR),
-        "audio" => (0.50, AUDIO_FLOOR),
-        _ => (1.00, 0),
-    };
-
-    if original_bytes <= floor || ratio >= 1.0 {
-        return CompressionResult {
-            applied: false,
-            compressed_bytes: original_bytes,
-            ratio: 1.0,
-        };
-    }
-
-    // Deterministic integer math so the test can assert exact values.
-    // ((original * numerator) + denominator/2) / denominator  gives
-    // rounded-nearest integer compression.
-    let num = (ratio * 100.0) as i64;
-    let compressed = (original_bytes * num + 50) / 100;
+/// These fields are reserved for future integration with an external
+/// offline transcoding pipeline. When such a pipeline is added, it would
+/// re-encode the file and update these fields with real output sizes.
+pub(crate) fn measure_stored_size(actual_file_bytes: i64) -> CompressionResult {
     CompressionResult {
-        applied: true,
-        compressed_bytes: compressed,
-        ratio,
+        applied: false,
+        compressed_bytes: actual_file_bytes,
+        ratio: 1.0,
     }
 }
 
@@ -536,17 +503,13 @@ pub async fn upload_complete(
     let watermark = build_watermark(&state.config.facility_code);
     let missing_exif = if body.exif_capture_time.is_none() && media_type == "photo" { 1 } else { 0 };
 
-    // Apply the local compression policy before persisting. The resulting
-    // compressed_bytes is also validated against the original size ceiling
-    // so an operator cannot use an inflated "compression" value to bypass
-    // per-type limits.
-    let compression = apply_compression_policy(&media_type, body.total_size);
-    if compression.compressed_bytes > body.total_size {
-        return Err(AppError::validation(
-            "Compression policy produced a larger payload — invalid configuration",
-            t,
-        ));
-    }
+    // Measure the actual stored file size. Currently no real transcoding
+    // is performed, so compressed_bytes == original. These fields are
+    // truthful: they reflect what is actually on disk.
+    let actual_size = std::fs::metadata(&assembled_path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(body.total_size);
+    let compression = measure_stored_size(actual_size);
 
     sqlx::query(
         "INSERT INTO evidence_records \
@@ -577,8 +540,8 @@ pub async fn upload_complete(
     // the evidence_records table, not in a log that can be exported.
     slog(&state.db, "info",
         &format!(
-            "evidence.upload_complete id={} media_type={} original={} compressed={} ratio={:.2}",
-            evidence_id, media_type, body.total_size, compression.compressed_bytes, compression.ratio
+            "evidence.upload_complete id={} media_type={} declared_size={} stored_size={}",
+            evidence_id, media_type, body.total_size, compression.compressed_bytes
         ), t).await;
 
     Ok((StatusCode::CREATED, Json(EvidenceResponse {
@@ -803,55 +766,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn photo_compression_applied_above_floor() {
-        let r = apply_compression_policy("photo", 1_000_000);
-        assert!(r.applied);
-        // 1_000_000 * 70 = 70_000_000 + 50 / 100 = 700_000
-        assert_eq!(r.compressed_bytes, 700_000);
-        assert!(r.ratio < 1.0);
-        assert!(r.compressed_bytes < 1_000_000);
+    fn measure_stored_size_reflects_actual() {
+        let r = measure_stored_size(1_000_000);
+        assert!(!r.applied, "no real compression performed");
+        assert_eq!(r.compressed_bytes, 1_000_000);
+        assert_eq!(r.ratio, 1.0);
     }
 
     #[test]
-    fn tiny_photo_below_floor_not_compressed() {
-        let r = apply_compression_policy("photo", 10_000);
+    fn measure_stored_size_small_file() {
+        let r = measure_stored_size(10_000);
         assert!(!r.applied);
         assert_eq!(r.compressed_bytes, 10_000);
         assert_eq!(r.ratio, 1.0);
     }
 
     #[test]
-    fn video_ratio_is_0_60() {
-        let r = apply_compression_policy("video", 10_000_000);
-        assert!(r.applied);
-        assert_eq!(r.compressed_bytes, 6_000_000);
-        assert_eq!(r.ratio, 0.60);
-    }
-
-    #[test]
-    fn audio_ratio_is_0_50() {
-        let r = apply_compression_policy("audio", 1_000_000);
-        assert!(r.applied);
-        assert_eq!(r.compressed_bytes, 500_000);
-        assert_eq!(r.ratio, 0.50);
-    }
-
-    #[test]
-    fn unknown_media_type_passes_through() {
-        let r = apply_compression_policy("other", 1_000_000);
-        assert!(!r.applied);
-        assert_eq!(r.compressed_bytes, 1_000_000);
-        assert_eq!(r.ratio, 1.0);
-    }
-
-    #[test]
-    fn compressed_never_exceeds_original() {
+    fn stored_size_never_exceeds_input() {
         for size in [1024i64, 1_000_000, 10_000_000, 100_000_000] {
-            for mt in ["photo", "video", "audio"] {
-                let r = apply_compression_policy(mt, size);
-                assert!(r.compressed_bytes <= size,
-                    "policy produced larger for {} @ {}", mt, size);
-            }
+            let r = measure_stored_size(size);
+            assert!(r.compressed_bytes <= size);
         }
     }
 

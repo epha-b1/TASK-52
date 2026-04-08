@@ -1,13 +1,24 @@
 #!/bin/bash
 # Audit fixes verification suite
-# Tests all 6 findings: fingerprint integrity, duration fail-safe,
-# traceability steps visibility, privacy preferences, supply fields,
-# cookie secure flag.
+# Tests: fingerprint integrity, duration enforcement, traceability steps
+# visibility, privacy preferences, supply fields, cookie secure flag,
+# adoption semantics, anti-passback override, key rotation, evidence metadata.
 set -e
 
+# Source shared helpers for session stability
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/test_helpers.sh" ]; then
+    source "$SCRIPT_DIR/test_helpers.sh"
+fi
+
 PASS=0; FAIL=0; BASE="http://localhost:8080"
-ADMIN_CK="/tmp/af_admin"; STAFF_CK="/tmp/af_staff"; AUDITOR_CK="/tmp/af_auditor"
 DB="/app/storage/app.db"
+
+# Use mktemp for cookie files if available, else fall back to /tmp
+ADMIN_CK=$(mktemp /tmp/af_admin_XXXXXX 2>/dev/null || echo "/tmp/af_admin_$$")
+STAFF_CK=$(mktemp /tmp/af_staff_XXXXXX 2>/dev/null || echo "/tmp/af_staff_$$")
+AUDITOR_CK=$(mktemp /tmp/af_auditor_XXXXXX 2>/dev/null || echo "/tmp/af_auditor_$$")
+trap 'rm -f "$ADMIN_CK" "$STAFF_CK" "$AUDITOR_CK"' EXIT
 
 check() {
     local name="$1" expected="$2" actual="$3"
@@ -45,14 +56,20 @@ JPEG_B64=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\
 
 echo "=== Audit Fixes Verification Suite ==="
 
-# ─── Setup ──────────────────────────────────────────────────────────────
-curl -s -c "$ADMIN_CK" -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
-  -d '{"username":"afadmin","password":"AuditFixAdm12"}' > /dev/null
+# ─── Setup: ensure admin session (standalone-safe) ────────────────────
+# Try login first (in case admin already exists from prior suite).
+# If that fails, bootstrap register.
+REG_CODE=$(curl -s -o /dev/null -w "%{http_code}" -c "$ADMIN_CK" -X POST "$BASE/auth/login" \
+  -H "Content-Type: application/json" -d '{"username":"afadmin","password":"AuditFixAdm12"}')
+if [ "$REG_CODE" != "200" ]; then
+    curl -s -c "$ADMIN_CK" -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+      -d '{"username":"afadmin","password":"AuditFixAdm12"}' > /dev/null
+fi
 
 curl -s -b "$ADMIN_CK" -X POST "$BASE/users" -H "Content-Type: application/json" \
-  -d '{"username":"afstaff","password":"AuditFixStf12","role":"operations_staff"}' > /dev/null
+  -d '{"username":"afstaff","password":"AuditFixStf12","role":"operations_staff"}' > /dev/null 2>&1
 curl -s -b "$ADMIN_CK" -X POST "$BASE/users" -H "Content-Type: application/json" \
-  -d '{"username":"afauditor","password":"AuditFixAud12","role":"auditor"}' > /dev/null
+  -d '{"username":"afauditor","password":"AuditFixAud12","role":"auditor"}' > /dev/null 2>&1
 
 curl -s -c "$STAFF_CK" -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
   -d '{"username":"afstaff","password":"AuditFixStf12"}' > /dev/null
@@ -524,14 +541,14 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
-# 10. COMPRESSION POLICY — metadata projection is honest
+# 10. EVIDENCE METADATA — truthful (no simulated compression)
 # ═══════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ 10. Storage budget policy (compression metadata) ━━━"
+echo "━━━ 10. Evidence metadata truthfulness ━━━"
 
-# Upload a 1 MiB photo — compression policy should project 0.70x
+# Upload a photo — metadata must reflect actual stored file, not projection
 CPBODY=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
-  -d '{"filename":"budget_test.jpg","media_type":"photo","total_size":1048576,"duration_seconds":0}')
+  -d '{"filename":"truth_test.jpg","media_type":"photo","total_size":1048576,"duration_seconds":0}')
 CPID=$(echo "$CPBODY" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$CPID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
@@ -539,22 +556,22 @@ CP_FP=$(printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00
 CPRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$CPID\",\"fingerprint\":\"$CP_FP\",\"total_size\":1048576}")
 
-# compressed_bytes must be less than original (budget projection applied)
+# compressed_bytes reflects actual file (no fake projection)
 COMP_BYTES=$(echo "$CPRESP" | grep -o '"compressed_bytes":[0-9]*' | cut -d':' -f2)
-if [ -n "$COMP_BYTES" ] && [ "$COMP_BYTES" -lt 1048576 ]; then
-    echo "PASS: Budget projection compressed_bytes ($COMP_BYTES) < original"; PASS=$((PASS+1))
+if [ -n "$COMP_BYTES" ] && [ "$COMP_BYTES" -gt 0 ]; then
+    echo "PASS: compressed_bytes ($COMP_BYTES) reflects actual file"; PASS=$((PASS+1))
 else
-    echo "FAIL: Budget projection unexpected: $COMP_BYTES"; FAIL=$((FAIL+1))
+    echo "FAIL: compressed_bytes invalid: $COMP_BYTES"; FAIL=$((FAIL+1))
 fi
 
-# compression_applied must be true for large photo
-contains "compression_applied is true" '"compression_applied":true' "$CPRESP"
+# No real transcoding → compression_applied must be false
+contains "compression_applied is false (truthful)" '"compression_applied":false' "$CPRESP"
 
-# compression_ratio should be 0.7 for photo
-if echo "$CPRESP" | grep -qE '"compression_ratio":0\.7'; then
-    echo "PASS: Photo budget ratio is 0.7"; PASS=$((PASS+1))
+# No real transcoding → ratio must be 1.0
+if echo "$CPRESP" | grep -qE '"compression_ratio":1'; then
+    echo "PASS: compression_ratio is 1.0 (no transcoding)"; PASS=$((PASS+1))
 else
-    echo "FAIL: Budget ratio unexpected in: $CPRESP"; FAIL=$((FAIL+1))
+    echo "FAIL: compression_ratio should be 1.0: $CPRESP"; FAIL=$((FAIL+1))
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

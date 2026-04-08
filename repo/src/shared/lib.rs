@@ -396,12 +396,12 @@ pub struct EvidenceResponse {
     pub id: String, pub filename: String, pub media_type: String,
     pub watermark_text: String, pub missing_exif: bool,
     pub linked: bool, pub legal_hold: bool, pub created_at: String,
-    /// Size after local compression policy (may equal `size_bytes` if the
-    /// policy decided not to re-encode).
+    /// Actual stored file size on disk. Currently equals the original size
+    /// (no in-process transcoding). Reserved for future offline pipeline.
     pub compressed_bytes: i64,
-    /// compressed_bytes / size_bytes. 1.0 means no compression applied.
+    /// 1.0 when no transcoding was performed (current behavior).
     pub compression_ratio: f64,
-    /// True when the policy actually re-encoded the payload.
+    /// False when the file was stored unchanged (current behavior).
     pub compression_applied: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

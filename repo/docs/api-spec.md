@@ -85,8 +85,8 @@ List addresses. Sensitive fields (street, city, phone) are masked in responses.
 
 ### POST /media/upload/start
 - **Body**: `{ "filename": string, "media_type": "photo"|"video"|"audio", "total_size": int, "duration_seconds": int }`
-- **Validation**: size limits (photo 25MB, video 150MB, audio 20MB), duration limits (video 60s, audio 120s)
-- **Duration enforcement**: `duration_seconds` is stored server-side. For video/audio, `duration_seconds > 0` is required (fail-safe: rejects bypass attempts at complete time).
+- **Validation**: size limits (photo 25MB, video 150MB, audio 20MB). If `duration_seconds` exceeds the policy limit (video > 60s, audio > 120s), the request is rejected early as a convenience — but this field is advisory only.
+- **Duration enforcement**: The actual duration constraint is enforced at `upload_complete` by extracting duration from the assembled file bytes (MP4 `mvhd` atom, WAV `fmt`+`data` chunks). The client-declared `duration_seconds` is NOT trusted for final acceptance. See `POST /media/upload/complete` for details.
 
 ### POST /media/upload/chunk
 - **Body**: `{ "upload_id": string, "chunk_index": int, "data": string }` (data is base64-encoded)
@@ -96,7 +96,7 @@ List addresses. Sensitive fields (street, city, phone) are masked in responses.
 - **Body**: `{ "upload_id": string, "fingerprint": string, "total_size": int, "exif_capture_time": string|null, "tags": string|null, "keyword": string|null }`
 - **Fingerprint verification**: Server computes SHA-256 from assembled file bytes. If the computed fingerprint does not match the client-provided `fingerprint`, returns `409 CONFLICT` with message "Fingerprint mismatch: server-computed fingerprint does not match client-provided value".
 - **Duration enforcement (server-side)**: For video/audio, the server extracts the actual duration from the assembled file bytes (MP4 `mvhd` atom or WAV `fmt`+`data` chunks). If the extracted duration exceeds the policy limit (video > 60s, audio > 120s), returns `400 VALIDATION_ERROR`. If the container format is unsupported or malformed and duration cannot be extracted, returns `400 VALIDATION_ERROR` with message "Cannot verify ... duration from uploaded file". This is an intentional fail-safe: the client-declared `duration_seconds` is **not** trusted for acceptance.
-- **Compression**: Applies deterministic compression policy before insert.
+- **Storage metadata**: No in-process transcoding is performed. The `compressed_bytes`, `compression_ratio`, and `compression_applied` fields reflect the actual stored file size (ratio 1.0, applied false). These fields are reserved for future offline transcoding pipeline integration.
 
 ### GET /evidence
 Query params: `keyword`, `tag`, `from`, `to`

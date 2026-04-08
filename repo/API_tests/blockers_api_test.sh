@@ -424,58 +424,54 @@ R=$(curl -s -o /dev/null -w "%{http_code}" -b "$ADMIN_CK" -X POST "$BASE/admin/r
 check "Negative max_age_days → 400" "400" "$R"
 
 # ═══════════════════════════════════════════════════════════════════════
-# 8. Local media compression on upload_complete
+# 8. Evidence metadata truthfulness (no simulated compression)
 # ═══════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ 8. Local media compression ━━━"
+echo "━━━ 8. Evidence metadata truthfulness ━━━"
 
-# Upload a photo with a size above the floor (256 KiB) so compression applies.
+# Upload a photo — metadata fields must reflect actual stored file.
+# No real transcoding is performed, so compressed_bytes == actual file size,
+# compression_applied == false, compression_ratio == 1.0.
 PHB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
-  -d '{"filename":"comp_photo.jpg","media_type":"photo","total_size":1048576,"duration_seconds":0}')
+  -d '{"filename":"truth_photo.jpg","media_type":"photo","total_size":1048576,"duration_seconds":0}')
 PHUID=$(echo "$PHB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
 curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$PHUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
 PHRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$PHUID\",\"fingerprint\":\"$JPEG_FP\",\"total_size\":1048576,\"exif_capture_time\":null,\"tags\":\"c\",\"keyword\":\"c\"}")
 
-# Compression metadata must be present
+# Metadata fields must be present in response
 for field in compressed_bytes compression_ratio compression_applied; do
     if echo "$PHRESP" | grep -q "\"$field\""; then
-        echo "PASS: photo upload response has $field"; PASS=$((PASS+1))
+        echo "PASS: photo response has $field"; PASS=$((PASS+1))
     else
-        echo "FAIL: photo upload response missing $field: $PHRESP"; FAIL=$((FAIL+1))
+        echo "FAIL: photo response missing $field: $PHRESP"; FAIL=$((FAIL+1))
     fi
 done
 
-# Compression must actually have been applied at 1 MiB (above the 256 KiB floor)
-if echo "$PHRESP" | grep -q '"compression_applied":true'; then
-    echo "PASS: compression applied on 1 MiB photo"; PASS=$((PASS+1))
+# No real compression performed — compression_applied must be false
+if echo "$PHRESP" | grep -q '"compression_applied":false'; then
+    echo "PASS: no simulated compression — compression_applied is false"; PASS=$((PASS+1))
 else
-    echo "FAIL: compression not applied on 1 MiB photo"; FAIL=$((FAIL+1))
+    echo "FAIL: compression_applied should be false (no real transcoding): $PHRESP"; FAIL=$((FAIL+1))
 fi
 
-# Ratio must be 0.7 for photo
-if echo "$PHRESP" | grep -qE '"compression_ratio":0\.7'; then
-    echo "PASS: photo compression ratio 0.7"; PASS=$((PASS+1))
+# Ratio must be 1.0 (no compression)
+if echo "$PHRESP" | grep -qE '"compression_ratio":1'; then
+    echo "PASS: compression_ratio is 1.0 (truthful)"; PASS=$((PASS+1))
 else
-    echo "FAIL: photo compression ratio wrong: $PHRESP"; FAIL=$((FAIL+1))
+    echo "FAIL: compression_ratio should be 1.0: $PHRESP"; FAIL=$((FAIL+1))
 fi
 
-# Upload a tiny photo below the 256 KiB floor — compression should NOT apply
-SMB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
-  -d '{"filename":"tiny.jpg","media_type":"photo","total_size":10000,"duration_seconds":0}')
-SMUID=$(echo "$SMB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
-curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$SMUID\",\"chunk_index\":0,\"data\":\"$JPEG_B64\"}" > /dev/null
-SMRESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$SMUID\",\"fingerprint\":\"$JPEG_FP\",\"total_size\":10000,\"exif_capture_time\":null,\"tags\":\"c\",\"keyword\":\"c\"}")
-if echo "$SMRESP" | grep -q '"compression_applied":false'; then
-    echo "PASS: tiny photo below floor NOT compressed"; PASS=$((PASS+1))
+# compressed_bytes must equal actual stored size (not a projection)
+COMP=$(echo "$PHRESP" | grep -o '"compressed_bytes":[0-9]*' | cut -d':' -f2)
+if [ -n "$COMP" ] && [ "$COMP" -gt 0 ]; then
+    echo "PASS: compressed_bytes ($COMP) reflects actual file"; PASS=$((PASS+1))
 else
-    echo "FAIL: tiny photo wrongly compressed: $SMRESP"; FAIL=$((FAIL+1))
+    echo "FAIL: compressed_bytes invalid: $COMP"; FAIL=$((FAIL+1))
 fi
 
-# Upload an audio file with different ratio (0.5)
+# Audio upload — same truthful metadata
 AB=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/start" -H "Content-Type: application/json" \
   -d '{"filename":"a.m4a","media_type":"audio","total_size":1048576,"duration_seconds":10}')
 AUID=$(echo "$AB" | grep -o '"upload_id":"[^"]*"' | cut -d'"' -f4)
@@ -483,18 +479,10 @@ curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/chunk" -H "Content-Type: appl
   -d "{\"upload_id\":\"$AUID\",\"chunk_index\":0,\"data\":\"$AUDIO_B64\"}" > /dev/null
 ARESP=$(curl -s -b "$ADMIN_CK" -X POST "$BASE/media/upload/complete" -H "Content-Type: application/json" \
   -d "{\"upload_id\":\"$AUID\",\"fingerprint\":\"$AUDIO_FP\",\"total_size\":1048576,\"exif_capture_time\":null,\"tags\":\"c\",\"keyword\":\"c\"}")
-if echo "$ARESP" | grep -qE '"compression_ratio":0\.5'; then
-    echo "PASS: audio compression ratio 0.5"; PASS=$((PASS+1))
+if echo "$ARESP" | grep -q '"compression_applied":false'; then
+    echo "PASS: audio truthful — compression_applied is false"; PASS=$((PASS+1))
 else
-    echo "FAIL: audio compression ratio wrong: $ARESP"; FAIL=$((FAIL+1))
-fi
-
-# Compressed size must not exceed original
-COMP=$(echo "$PHRESP" | grep -o '"compressed_bytes":[0-9]*' | cut -d':' -f2)
-if [ -n "$COMP" ] && [ "$COMP" -le "1048576" ] && [ "$COMP" -lt "1048576" ]; then
-    echo "PASS: compressed_bytes ($COMP) < original (1048576)"; PASS=$((PASS+1))
-else
-    echo "FAIL: compressed_bytes suspicious: $COMP"; FAIL=$((FAIL+1))
+    echo "FAIL: audio compression_applied should be false: $ARESP"; FAIL=$((FAIL+1))
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

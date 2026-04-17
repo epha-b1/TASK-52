@@ -1,0 +1,18 @@
+[package]
+name = "fieldtrace-frontend-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Host-target unit tests for the real frontend modules under src/frontend/"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+fieldtrace-shared = { path = "../shared" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Keep Rust-native test framework only; dev-dependencies give us the
+# "framework clearly present" marker equivalent to Vitest/Jest +
+# Testing Library for the Rust frontend.

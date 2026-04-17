@@ -203,6 +203,10 @@ echo "[Step 13] Audit fixes verification..."
 reset_db
 run_suite "AuditFixes" "API_tests/audit_fixes_test.sh"
 
+echo "[Step 14] Coverage-gap endpoints (GET /inspections, PATCH /supply-entries/:id/resolve, GET /traceability, GET /transfers/:id, GET /stock/movements, PATCH /users/:id)..."
+reset_db
+run_suite "CoverageGap" "API_tests/coverage_gap_api_test.sh"
+
 # Summary
 echo "========================================"
 if [ $TOTAL_FAIL -eq 0 ]; then

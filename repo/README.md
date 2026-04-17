@@ -1,6 +1,10 @@
 # FieldTrace Rescue & Supply Chain
 
-Offline-first shelter and warehouse management system.
+**Project type:** fullstack
+
+Offline-first shelter and warehouse management system with an Axum/Rust
+HTTP API and a Leptos/Rust WASM browser frontend, both shipped from a
+single Docker Compose stack.
 
 ## Stack
 
@@ -55,6 +59,16 @@ Valid roles: `administrator`, `operations_staff`, `auditor`.
 ---
 
 ## Quick Start
+
+Run the stack with Docker Compose. Both syntaxes below are supported;
+pick whichever your Docker install ships.
+
+```bash
+docker-compose up
+```
+
+Or, on installs with the modern Compose plugin (forces a rebuild on
+code changes):
 
 ```bash
 docker compose up --build

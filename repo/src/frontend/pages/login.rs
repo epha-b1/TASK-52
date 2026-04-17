@@ -2,6 +2,7 @@ use leptos::*;
 
 use crate::api::client;
 use crate::app::Page;
+use crate::logic::auth_form::can_submit;
 use fieldtrace_shared::UserResponse;
 
 #[component]
@@ -77,7 +78,10 @@ pub fn LoginPage<F: Fn() + Clone + 'static>(
                         on:input=move |ev| set_password.set(event_target_value(&ev))
                         required=true
                     />
-                    <button type="submit" disabled=loading>
+                    <button
+                        type="submit"
+                        disabled=move || loading.get() || !can_submit(&username.get(), &password.get())
+                    >
                         {move || if loading.get() { "Signing in..." } else { "Sign In" }}
                     </button>
                 </form>

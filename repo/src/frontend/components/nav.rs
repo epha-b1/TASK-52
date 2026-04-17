@@ -1,6 +1,8 @@
 use leptos::*;
 use fieldtrace_shared::UserResponse;
 
+use crate::logic::ui_format::role_label as format_role;
+
 #[component]
 pub fn Nav<F: Fn() + Clone + 'static>(
     user: ReadSignal<Option<UserResponse>>,
@@ -11,12 +13,7 @@ pub fn Nav<F: Fn() + Clone + 'static>(
             <h1>"FieldTrace"</h1>
             <div class="nav-spacer"></div>
             {move || user.get().map(|u| {
-                let role_label = match u.role.as_str() {
-                    "administrator" => "Admin",
-                    "operations_staff" => "Staff",
-                    "auditor" => "Auditor",
-                    _ => "User",
-                }.to_string();
+                let role_label = format_role(&u.role);
                 let username = u.username.clone();
                 let on_logout = on_logout.clone();
                 view! {

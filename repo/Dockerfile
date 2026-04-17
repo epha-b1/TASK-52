@@ -15,12 +15,16 @@ RUN rustup target add wasm32-unknown-unknown
 # Copy everything and build directly — no dep caching tricks
 COPY . .
 RUN cd src/frontend && trunk build
-# Run Rust unit tests for backend + shared as part of the build.
-# Backend tests cover: common::CivilDateTime, crypto AES round-trip, error
-# envelope flattening, zip writer, traceability code checksum, supply parser,
-# evidence compression policy, log sanitizer. Shared tests cover the draft
-# autosave serialization + key constants used by the frontend.
-RUN cargo test --release -p fieldtrace-backend -p fieldtrace-shared
+# Run Rust unit tests for backend + shared + frontend-tests as part of the
+# build. Backend tests cover: common::CivilDateTime, crypto AES round-trip,
+# error envelope flattening, zip writer, traceability code checksum, supply
+# parser, evidence compression policy, log sanitizer. Shared tests cover the
+# draft autosave serialization + key constants used by the frontend.
+# fieldtrace-frontend-tests is a host-target lib that #[path]-imports the
+# real frontend modules under src/frontend/ and locks their behaviour
+# (session state machine, auth form validator, dashboard filter
+# serialiser, intake form, shared UI formatters).
+RUN cargo test --release -p fieldtrace-backend -p fieldtrace-shared -p fieldtrace-frontend-tests
 RUN cargo build --release -p fieldtrace-backend
 
 # === Runtime stage ===
